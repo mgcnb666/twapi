@@ -22,6 +22,7 @@ class Settings:
     request_timeout: float = 15.0
     max_retries: int = 5
     health_check_interval: int = 120  # seconds
+    enable_cf_browser: bool = False   # enable Cloudflare bypass (requires Chrome + Xvfb)
 
 
 settings = Settings()

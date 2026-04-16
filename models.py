@@ -45,12 +45,16 @@ class UserTweetsResponse(BaseModel):
     user: str
     tweets: list[Tweet]
     cursor: str = ""
+    page: int = 1
+    total_fetched: int = 0
 
 
 class SearchResponse(BaseModel):
     query: str
     tweets: list[Tweet]
     cursor: str = ""
+    page: int = 1
+    total_fetched: int = 0
 
 
 class InstanceHealth(BaseModel):

@@ -46,9 +46,11 @@ class NitterClient:
     # ---- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
-        # Start CF browser in background thread first (non-blocking)
-        asyncio.get_event_loop().run_in_executor(None, self._init_cf_browser)
-        # Start health loop (checks non-CF instances immediately, CF later)
+        if settings.enable_cf_browser:
+            try:
+                asyncio.get_event_loop().run_in_executor(None, self._init_cf_browser)
+            except Exception:
+                pass
         asyncio.create_task(self._health_loop())
 
     def _init_cf_browser(self) -> None:
@@ -56,9 +58,14 @@ class NitterClient:
             from cf_browser import browser
             browser.start()
             self._cf_browser = browser
+            # Mark CF instances as tentatively available (latency unknown)
+            for url in self._instances:
+                if self._is_cf_instance(url):
+                    self._health[url] = 5000.0
             log.info("CloudflareBrowser started")
         except Exception as exc:
             log.warning("CloudflareBrowser failed to start: %s", exc)
+            self._cf_browser = None
 
     async def close(self) -> None:
         if self._cf_browser:
@@ -182,10 +189,17 @@ class NitterClient:
         url = base.rstrip("/") + "/" + path.lstrip("/")
         if params:
             url += "?" + urlencode(params)
-        html = await asyncio.get_event_loop().run_in_executor(
-            None, self._cf_browser.fetch, url
-        )
-        return html
+        try:
+            html = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, self._cf_browser.fetch, url
+                ),
+                timeout=90.0,
+            )
+            return html
+        except asyncio.TimeoutError:
+            log.warning("CF browser timeout for %s", url)
+            return None
 
     def _is_cf_instance(self, base: str) -> bool:
         return base in CF_INSTANCES
@@ -297,68 +311,21 @@ class NitterClient:
                 self._health[url] = -1
 
     async def _check_cf_instances(self) -> None:
-        """Check CF instances sequentially through the browser."""
-        if not self._cf_browser or not self._cf_browser.is_available():
-            return
-        cf_list = [u for u in self._instances if self._is_cf_instance(u)]
-        for url in cf_list:
-            try:
-                t0 = time.monotonic()
-                test_url = url.rstrip("/") + "/elonmusk"
-                loop = asyncio.get_event_loop()
-                html = await asyncio.wait_for(
-                    loop.run_in_executor(None, self._cf_browser.fetch, test_url),
-                    timeout=90.0,
-                )
-                latency = (time.monotonic() - t0) * 1000
-                if html and "profile-card" in html and not _is_cf_page(html):
-                    async with self._lock:
-                        self._health[url] = latency
-                else:
-                    async with self._lock:
-                        self._health[url] = -1
-            except Exception as exc:
-                log.debug("CF check failed for %s: %s", url, exc)
-                async with self._lock:
-                    self._health[url] = -1
+        """No-op: CF instances are validated on-demand during fetch."""
+        pass
 
     async def check_health(self) -> dict[str, float]:
-        """Check non-CF instances. CF status uses cached values."""
+        """Check non-CF instances. CF instances keep their last-known status."""
         await asyncio.gather(*(self._check_one(u) for u in self._instances))
         return dict(self._health)
 
     async def _health_loop(self) -> None:
-        # First check non-CF instances quickly
-        try:
-            await asyncio.gather(*(self._check_one(u) for u in self._instances))
-        except Exception:
-            pass
-
-        # Wait for CF browser to be ready, then do initial CF solve
-        for _ in range(30):
-            await asyncio.sleep(2)
-            if self._cf_browser and self._cf_browser.is_available():
-                break
-        try:
-            await self._check_cf_instances()
-        except Exception:
-            pass
-
-        cf_counter = 0
         while True:
-            await asyncio.sleep(settings.health_check_interval)
             try:
                 await asyncio.gather(*(self._check_one(u) for u in self._instances))
             except Exception:
                 pass
-            cf_counter += 1
-            # Re-check CF instances every 5 cycles (~10 min)
-            if cf_counter >= 5:
-                cf_counter = 0
-                try:
-                    await self._check_cf_instances()
-                except Exception:
-                    pass
+            await asyncio.sleep(settings.health_check_interval)
 
 
 # ---------------------------------------------------------------------------

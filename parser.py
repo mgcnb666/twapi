@@ -182,13 +182,13 @@ def parse_tweets(html: str, base_url: str) -> tuple[list[Tweet], str]:
         except Exception:
             continue
 
-    # pagination cursor
+    # pagination cursor – pick the show-more link that contains "cursor="
     cursor = ""
-    show_more = soup.select_one(".show-more a")
-    if show_more:
+    for show_more in soup.select(".show-more a"):
         href = _attr(show_more, "href")
         if "cursor=" in href:
             cursor = href.split("cursor=")[-1].split("&")[0]
+            break
 
     return tweets, cursor
 

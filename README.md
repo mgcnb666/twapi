@@ -1,101 +1,99 @@
-# TwAPI – Twitter API powered by Nitter
+# TwAPI – 基于 Nitter 的 Twitter API
 
-A self-hosted REST API that fetches real-time Twitter/X data through public Nitter instances.
-Every request returns **fresh, live data** — no caching.
+自托管的 REST API，通过公共 Nitter 实例获取 Twitter/X 实时数据。
+每次请求都返回**最新数据**，不使用缓存。
 
-Features:
-- **Anubis anti-bot bypass** — automatic PoW solver (preact + fast formats)
-- **Cloudflare managed challenge bypass** — headless Chrome via SeleniumBase UC mode
-- **TLS fingerprint impersonation** — `curl_cffi` with Chrome 124 fingerprint
-- **Smart instance rotation** — latency-weighted selection with automatic health checks
-- **7 of 8 instances working** — only `nitter.poast.org` (server down) excluded
+### 功能特性
 
-## Prerequisites
+- **Anubis 反爬破解** — 自动 PoW 求解器（preact + fast 两种格式）
+- **Cloudflare 挑战绕过** — SeleniumBase UC 模式无头 Chrome（可选）
+- **TLS 指纹伪装** — `curl_cffi` 模拟 Chrome 124 浏览器指纹
+- **智能实例轮换** — 按延迟加权选择，自动健康检查
+- **自动分页** — 支持 `page=N` 页码和 `count=N` 指定数量获取
+- **最多 500 条** — 一次请求获取指定数量的推文（自动翻页）
+
+## 系统要求
 
 ```bash
-# System packages (Debian/Ubuntu)
-apt-get install -y xvfb python3-tk google-chrome-stable
-
-# Python dependencies
+# Python 依赖
 pip install -r requirements.txt
 ```
 
-> **Chrome** is needed for the Cloudflare bypass. If Chrome is not installed, CF
-> instances are simply skipped and the remaining 4 non-CF instances still work.
+如需启用 Cloudflare 绕过（可选）：
+```bash
+apt-get install -y xvfb python3-tk google-chrome-stable
+# 在 config.py 中设置 enable_cf_browser = True
+```
 
-## Quick Start
+## 快速开始
 
 ```bash
 python main.py
-# Server starts on http://0.0.0.0:30192
+# 服务启动在 http://0.0.0.0:30192
 ```
 
-## Configuration
+## 配置
 
-Edit `config.py`:
+编辑 `config.py`：
 
 ```python
 @dataclass
 class Settings:
-    port: int = 30192                # API server port
-    instances: list[str] = ...       # Nitter instance URLs
-    request_timeout: float = 15.0    # per-request timeout
-    max_retries: int = 5             # retries across instances
-    health_check_interval: int = 120 # seconds between health loops
+    port: int = 30192                # 服务端口
+    instances: list[str] = ...       # Nitter 实例列表
+    request_timeout: float = 15.0    # 单次请求超时
+    max_retries: int = 5             # 跨实例重试次数
+    health_check_interval: int = 120 # 健康检查间隔（秒）
+    enable_cf_browser: bool = False  # 启用 Cloudflare 绕过
 ```
 
-Custom port example:
+自定义端口：
 ```python
 settings = Settings(port=8080)
 ```
 
 ---
 
-## Instance Status
+## 实例状态
 
-| Instance | Protection | Bypass Method | Status |
+| 实例 | 保护方式 | 绕过方法 | 状态 |
 |---|---|---|---|
-| xcancel.com | BotD (FingerprintJS) | TLS impersonation | ✅ Profile/Timeline |
-| nitter.privacyredirect.com | Anubis (preact) | SHA-256 hash | ✅ All endpoints |
-| nitter.tiekoetter.com | Anubis PoW (fast) | SHA-256 brute-force | ✅ All endpoints |
-| nitter.catsarch.com | Anubis PoW (fast) | SHA-256 brute-force | ✅ All endpoints |
-| lightbrd.com | Cloudflare | SeleniumBase UC Chrome | ✅ All endpoints |
-| nitter.space | Cloudflare | SeleniumBase UC Chrome | ✅ All endpoints |
-| nuku.trabun.org | Cloudflare | SeleniumBase UC Chrome | ✅ All endpoints |
-| nitter.poast.org | Server down | N/A | ❌ 503 |
+| xcancel.com | BotD (FingerprintJS) | TLS 指纹伪装 | ✅ 个人页/时间线 |
+| nitter.privacyredirect.com | Anubis (preact) | SHA-256 哈希 | ✅ 所有端点 |
+| nitter.tiekoetter.com | Anubis PoW (fast) | SHA-256 暴力破解 | ✅ 所有端点 |
+| nitter.catsarch.com | Anubis PoW (fast) | SHA-256 暴力破解 | ✅ 所有端点 |
+| lightbrd.com | Cloudflare | Chrome 浏览器（可选） | ⚠️ 需启用 CF 浏览器 |
+| nitter.space | Cloudflare | Chrome 浏览器（可选） | ⚠️ 需启用 CF 浏览器 |
+| nuku.trabun.org | Cloudflare | Chrome 浏览器（可选） | ⚠️ 需启用 CF 浏览器 |
+| nitter.poast.org | 服务器宕机 | N/A | ❌ 503 |
 
-**7 of 8 instances active.** The system automatically rotates between healthy instances, weighting by latency.
+默认模式下 **4 个实例可用**，启用 CF 浏览器后最多 **7 个实例**。
 
-### Anti-Bot Bypass Details
+### 反爬破解原理
 
-**Anubis Preact** (privacyredirect): Challenge string in `<script id="preact_info">`.
-Solution = `SHA-256(challenge_hex)`. Submit to redirect URL → JWT cookie valid ~7 days.
+**Anubis Preact**（privacyredirect）：从 `<script id="preact_info">` 提取挑战字符串，
+计算 `SHA-256(challenge)` 提交即可获得 JWT cookie（有效期约 7 天）。
 
-**Anubis Fast PoW** (tiekoetter, catsarch): `randomData` + `difficulty` in `<script id="anubis_challenge">`.
-Find nonce where `SHA-256(randomData + nonce)` has N leading zero hex digits. Submit hash + nonce → JWT cookie.
+**Anubis Fast PoW**（tiekoetter, catsarch）：从 `<script id="anubis_challenge">` 提取 `randomData` 和 `difficulty`，
+暴力搜索 nonce 使得 `SHA-256(randomData + nonce)` 的前 N 位为 0。
 
-**Cloudflare Managed Challenge** (lightbrd, nitter.space, nuku.trabun.org):
-A background Chrome browser (SeleniumBase UC mode) runs in a worker thread with Xvfb virtual display.
-It solves the turnstile challenge via `uc_gui_click_captcha()`. Once solved per domain, subsequent
-requests reuse the session cookies and complete in ~2-3 seconds.
-
-> CF cookies are TLS-fingerprint-bound, so the browser must be used for all requests to CF instances
-> (cookies cannot be transferred to curl_cffi).
-
-**xcancel.com**: Profile/timeline work with Chrome TLS impersonation (`curl_cffi`).
-Tweet detail and search are blocked by FingerprintJS BotD (requires real browser JS execution).
+**Cloudflare**（lightbrd, nitter.space, nuku.trabun.org）：
+后台 Chrome 浏览器通过 SeleniumBase UC 模式绕过 Turnstile 验证。
+首次解决约需 20-40 秒，后续请求复用会话约 2-3 秒。
 
 ---
 
-## API Endpoints
+## API 端点
 
-### 1. User Profile
+### 1. 用户资料
 
 ```
 GET /api/user/{username}
 ```
 
-Response:
+示例：`GET /api/user/elonmusk`
+
+返回：
 ```json
 {
   "username": "@elonmusk",
@@ -108,18 +106,39 @@ Response:
   "join_date": "Joined June 2009",
   "tweets_count": "101,354",
   "following_count": "1,311",
-  "followers_count": "238,107,708",
+  "followers_count": "238,117,648",
   "likes_count": "222,894"
 }
 ```
 
-### 2. User Tweets (Timeline)
+### 2. 用户推文（时间线）
 
 ```
-GET /api/user/{username}/tweets?cursor=
+GET /api/user/{username}/tweets
 ```
 
-Response:
+**分页参数（三种方式）：**
+
+| 参数 | 说明 | 示例 |
+|---|---|---|
+| `page` | 页码（默认 1，每页约 20 条） | `?page=3` 获取第 3 页 |
+| `count` | 指定获取总数（自动翻页，最大 500） | `?count=100` 获取最新 100 条 |
+| `cursor` | 原始游标值（高级用法） | `?cursor=DAAHCgAB...` |
+
+示例：
+
+```bash
+# 获取第 1 页（默认）
+GET /api/user/elonmusk/tweets
+
+# 获取第 3 页
+GET /api/user/elonmusk/tweets?page=3
+
+# 获取最新 100 条推文
+GET /api/user/elonmusk/tweets?count=100
+```
+
+返回：
 ```json
 {
   "user": "elonmusk",
@@ -128,8 +147,8 @@ Response:
       "id": "2044683867630833961",
       "author": "@elonmusk",
       "display_name": "Elon Musk",
-      "avatar_url": "https://pbs.twimg.com/profile_images/.../photo_bigger.jpg",
-      "text": "Look at the tiny cars in the foreground...",
+      "avatar_url": "https://pbs.twimg.com/...",
+      "text": "推文内容...",
       "date": "Apr 16, 2026 · 7:46 AM UTC",
       "retweets": "480",
       "quotes": "0",
@@ -142,140 +161,119 @@ Response:
       "link": "/elonmusk/status/2044683867630833961#m"
     }
   ],
-  "cursor": "DAAHCgABHGA6PFI__-sL..."
+  "cursor": "DAAHCgABHGA6PFI__-sL...",
+  "page": 1,
+  "total_fetched": 20
 }
 ```
 
-Use the `cursor` value for pagination:
-```
-GET /api/user/elonmusk/tweets?cursor=DAAHCgABHGA6PFI__-sL...
-```
-
-### 3. Tweet Detail
+### 3. 推文详情
 
 ```
 GET /api/tweet/{username}/status/{tweet_id}
 ```
 
-Response:
+示例：`GET /api/tweet/elonmusk/status/2044664503598760073`
+
+返回：
 ```json
 {
   "tweet": {
     "id": "2044664503598760073",
     "author": "@elonmusk",
-    "display_name": "Elon Musk",
-    "text": "Starship Super Heavy Booster, the most powerful moving object ever made by far",
-    "date": "Apr 16, 2026 · 6:29 AM UTC",
-    "retweets": "2,670",
+    "text": "Starship Super Heavy Booster...",
     "likes": "24,260",
-    "replies": "2,027",
-    "images": ["https://pbs.twimg.com/orig/media/HF_XtVIXcAQ5jrN.jpg"],
-    "videos": [],
-    "is_retweet": false,
-    "is_pinned": false,
-    "link": "/elonmusk/status/2044664503598760073#m"
+    "retweets": "2,670",
+    "images": ["https://pbs.twimg.com/orig/media/...jpg"]
   },
   "replies": [
-    {
-      "id": "...",
-      "author": "@user",
-      "text": "Amazing!",
-      "likes": "42",
-      "replies": "3"
-    }
+    { "id": "...", "author": "@user", "text": "回复内容..." }
   ]
 }
 ```
 
-### 4. Search Tweets
+### 4. 搜索推文
 
 ```
-GET /api/search?q=keyword&cursor=
+GET /api/search?q=关键词
 ```
 
-Response:
+**分页参数**（同用户推文）：
+
+```bash
+# 搜索 "tesla" 第 1 页
+GET /api/search?q=tesla
+
+# 搜索 "AI" 前 80 条结果
+GET /api/search?q=AI&count=80
+
+# 搜索第 2 页
+GET /api/search?q=tesla&page=2
+```
+
+返回：
 ```json
 {
   "query": "tesla",
-  "tweets": [
-    {
-      "id": "...",
-      "author": "@user",
-      "text": "Tesla AI5 chip is incredible...",
-      "likes": "1,234"
-    }
-  ],
-  "cursor": "..."
+  "tweets": [ ... ],
+  "cursor": "...",
+  "page": 1,
+  "total_fetched": 20
 }
 ```
 
-### 5. Instance Health
+### 5. 实例健康状态
 
 ```
 GET /api/health
 ```
 
-Response:
+返回：
 ```json
 {
   "instances": [
     { "url": "https://xcancel.com", "healthy": true, "latency_ms": 155.0 },
-    { "url": "https://nitter.poast.org", "healthy": false, "latency_ms": -1.0 },
-    { "url": "https://nitter.privacyredirect.com", "healthy": true, "latency_ms": 1086.0 },
-    { "url": "https://lightbrd.com", "healthy": true, "latency_ms": 48221.0 },
-    { "url": "https://nitter.space", "healthy": true, "latency_ms": 14451.0 },
-    { "url": "https://nitter.tiekoetter.com", "healthy": true, "latency_ms": 366.0 },
-    { "url": "https://nuku.trabun.org", "healthy": true, "latency_ms": 11648.0 },
-    { "url": "https://nitter.catsarch.com", "healthy": true, "latency_ms": 481.0 }
+    { "url": "https://nitter.poast.org", "healthy": false, "latency_ms": -1.0 }
   ],
-  "active_count": 7,
+  "active_count": 4,
   "total_count": 8
 }
 ```
 
 ---
 
-## Error Responses
+## 错误响应
 
-| Status | Example |
+| 状态码 | 示例 |
 |---|---|
 | 404 | `{"detail": "Profile card not found – user may not exist"}` |
 | 502 | `{"detail": "Nitter fetch failed: All Nitter instances failed"}` |
 
-## Architecture
+## 架构
 
 ```
-Client → FastAPI (port 30192)
+客户端 → FastAPI (端口 30192)
            ↓
          NitterClient
-           ├─ Instance rotation (latency-weighted)
-           ├─ Anubis PoW solver (preact + fast)
-           ├─ TLS fingerprint impersonation (curl_cffi)
-           ├─ Cloudflare bypass (SeleniumBase UC Chrome + Xvfb)
-           ├─ Cookie persistence per instance
-           └─ Auto health checks every 120s (CF every ~10 min)
+           ├─ 实例轮换（延迟加权）
+           ├─ Anubis PoW 求解器（preact + fast）
+           ├─ TLS 指纹伪装（curl_cffi）
+           ├─ Cloudflare 绕过（Chrome，可选）
+           ├─ Cookie 持久化
+           ├─ 自动分页（page/count）
+           └─ 健康检查（每 120 秒）
            ↓
-         Nitter Instances → Twitter/X
+         Nitter 实例 → Twitter/X
 ```
 
-```
-Non-CF instances:  curl_cffi (Chrome TLS fingerprint)
-                     ├─ Anubis challenge → auto-solve PoW → JWT cookie
-                     └─ Direct fetch with saved cookies
+## 文件说明
 
-CF instances:      SeleniumBase UC Chrome (worker thread)
-                     ├─ First visit → uc_gui_click_captcha() → cf_clearance cookie
-                     └─ Subsequent visits → reuse session (~2-3s)
-```
-
-## Files
-
-| File | Description |
+| 文件 | 说明 |
 |---|---|
-| `main.py` | FastAPI app, routes, entry point |
-| `config.py` | Settings (port, instances, timeouts) |
-| `nitter_client.py` | HTTP client, instance rotation, Anubis solver, CF integration |
-| `cf_browser.py` | Cloudflare bypass — SeleniumBase UC Chrome in worker thread |
-| `parser.py` | HTML→JSON parser for Nitter pages |
-| `models.py` | Pydantic response models |
-| `requirements.txt` | Python dependencies |
+| `main.py` | FastAPI 应用、路由、分页逻辑、入口 |
+| `config.py` | 配置（端口、实例、超时、CF 开关） |
+| `nitter_client.py` | HTTP 客户端、实例轮换、Anubis 求解、CF 集成 |
+| `cf_browser.py` | Cloudflare 绕过 — SeleniumBase UC Chrome 工作线程 |
+| `parser.py` | HTML→JSON 解析器 |
+| `models.py` | Pydantic 响应模型 |
+| `requirements.txt` | Python 依赖 |
