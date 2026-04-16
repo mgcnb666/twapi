@@ -10,13 +10,17 @@ GET /api/user/{username}/tweets       – user timeline
 GET /api/user/{username}/retweets     – user retweets only
 GET /api/tweet/{username}/status/{id} – single tweet + replies
 GET /api/search?q=keyword             – search tweets
+GET /api/search/users?q=keyword       – search users
 GET /api/health                       – instance health
 GET /dashboard                        – API statistics dashboard
 """
 
 from __future__ import annotations
 
+import logging
+import logging.handlers
 import math
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
@@ -31,11 +35,59 @@ from models import (
     Tweet,
     UserProfile,
     UserRetweetsResponse,
+    UserSearchResponse,
     UserTweetsResponse,
 )
 from nitter_client import client
-from parser import parse_tweet_detail, parse_tweets, parse_user_profile
+from parser import parse_tweet_detail, parse_tweets, parse_user_profile, parse_user_search
 from stats import stats_tracker, StatsMiddleware
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+def _setup_logging() -> None:
+    """Configure 'twapi' logger with console + rotating file handlers."""
+    twapi_log = logging.getLogger("twapi")
+    if twapi_log.handlers:
+        return  # already configured (uvicorn reloads the module)
+    twapi_log.setLevel(logging.DEBUG)
+    twapi_log.propagate = False
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Console handler
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(fmt)
+    twapi_log.addHandler(console)
+
+    # Rotating file handler – all levels
+    all_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(LOG_DIR, "twapi.log"), maxBytes=5 * 1024 * 1024, backupCount=3,
+        encoding="utf-8",
+    )
+    all_handler.setLevel(logging.DEBUG)
+    all_handler.setFormatter(fmt)
+    twapi_log.addHandler(all_handler)
+
+    # Error-only file handler for quick diagnosis
+    err_handler = logging.handlers.RotatingFileHandler(
+        os.path.join(LOG_DIR, "error.log"), maxBytes=5 * 1024 * 1024, backupCount=3,
+        encoding="utf-8",
+    )
+    err_handler.setLevel(logging.ERROR)
+    err_handler.setFormatter(fmt)
+    twapi_log.addHandler(err_handler)
+
+_setup_logging()
+log = logging.getLogger("twapi.main")
 
 # Nitter returns ~20 tweets per page
 PAGE_SIZE = 20
@@ -118,16 +170,19 @@ async def _fetch_all_tweets(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log.info("TwAPI v1.4.0 starting on port %d", settings.port)
     stats_tracker.init_db()
     await client.start()
+    log.info("Startup complete — Nitter client ready")
     yield
+    log.info("Shutting down")
     await client.close()
 
 
 app = FastAPI(
     title="TwAPI",
     description="Twitter/X REST API powered by public Nitter instances",
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 app.add_middleware(StatsMiddleware)
@@ -141,7 +196,7 @@ app.add_middleware(StatsMiddleware)
 async def root():
     return {
         "name": "TwAPI",
-        "version": "1.3.0",
+        "version": "1.4.0",
         "docs": "/docs",
         "dashboard": "/dashboard",
         "endpoints": [
@@ -150,6 +205,7 @@ async def root():
             "GET /api/user/{username}/retweets?page=1&count=20&all=false",
             "GET /api/tweet/{username}/status/{tweet_id}",
             "GET /api/search?q=keyword&page=1&count=20&all=false",
+            "GET /api/search/users?q=keyword&page=1&count=20",
             "GET /api/health",
             "GET /api/stats",
             "GET /dashboard",
@@ -164,8 +220,10 @@ async def get_user_profile(username: str):
         html, base = await client.fetch(f"/{username}")
         return parse_user_profile(html, base)
     except ValueError as e:
+        log.warning("Profile not found for %s: %s", username, e)
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        log.error("Failed to fetch profile for %s: %s", username, e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
 
 
@@ -215,6 +273,7 @@ async def get_user_tweets(
     except HTTPException:
         raise
     except Exception as e:
+        log.error("Failed to fetch tweets for %s: %s", username, e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
 
 
@@ -268,6 +327,7 @@ async def get_user_retweets(
     except HTTPException:
         raise
     except Exception as e:
+        log.error("Failed to fetch retweets for %s: %s", username, e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
 
 
@@ -278,11 +338,13 @@ async def get_tweet(username: str, tweet_id: str):
         html, base = await client.fetch(f"/{username}/status/{tweet_id}")
         main_tweet, replies = parse_tweet_detail(html, base)
         if not main_tweet:
+            log.warning("Tweet not found: %s/status/%s", username, tweet_id)
             raise HTTPException(status_code=404, detail="Tweet not found")
         return TweetDetail(tweet=main_tweet, replies=replies)
     except HTTPException:
         raise
     except Exception as e:
+        log.error("Failed to fetch tweet %s/status/%s: %s", username, tweet_id, e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
 
 
@@ -334,6 +396,50 @@ async def search_tweets(
     except HTTPException:
         raise
     except Exception as e:
+        log.error("Search failed for q=%s: %s", q, e, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
+
+
+@app.get("/api/search/users", response_model=UserSearchResponse)
+async def search_users(
+    q: str = Query(..., description="Search query"),
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total users to fetch"),
+    cursor: str = Query("", description="Raw pagination cursor"),
+):
+    """Search Twitter users by keyword.
+
+    - **page=N**: fetch page N of user results (~20 per page).
+    - **count=N**: fetch up to N users total (max 500).
+    - **cursor**: raw Nitter cursor for manual pagination.
+    """
+    base_params: dict[str, str] = {"f": "users", "q": q}
+    try:
+        if cursor:
+            params = {**base_params, "cursor": cursor}
+            html, base = await client.fetch("/search", params=params)
+            users, next_cursor = parse_user_search(html, base)
+            return UserSearchResponse(
+                query=q, users=users, cursor=next_cursor,
+                page=0, total_fetched=len(users),
+            )
+
+        if count > 0:
+            users, last_cursor = await _fetch_users_multi(base_params, count)
+            return UserSearchResponse(
+                query=q, users=users, cursor=last_cursor,
+                page=0, total_fetched=len(users),
+            )
+
+        users, next_cursor = await _fetch_users_page_n(base_params, page)
+        return UserSearchResponse(
+            query=q, users=users, cursor=next_cursor,
+            page=page, total_fetched=len(users),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("User search failed for q=%s: %s", q, e, exc_info=True)
         raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
 
 
@@ -398,6 +504,52 @@ async def _fetch_page_n(
         if not cursor and current < page:
             break  # no more pages available
     return tweets, cursor
+
+
+async def _fetch_users_page_n(
+    base_params: dict[str, str],
+    page: int,
+) -> tuple[list, str]:
+    """Fetch page N of user search results."""
+    from models import UserSearchResult
+    cursor = ""
+    users: list[UserSearchResult] = []
+    for current in range(1, page + 1):
+        params = dict(base_params)
+        if cursor:
+            params["cursor"] = cursor
+        html, base = await client.fetch("/search", params=params)
+        users, next_cursor = parse_user_search(html, base)
+        cursor = next_cursor
+        if not cursor and current < page:
+            break
+    return users, cursor
+
+
+async def _fetch_users_multi(
+    base_params: dict[str, str],
+    count: int,
+) -> tuple[list, str]:
+    """Fetch up to *count* users by auto-paginating."""
+    from models import UserSearchResult
+    all_users: list[UserSearchResult] = []
+    cursor = ""
+    max_pages = _effective_max_pages(count)
+    pages_fetched = 0
+    while len(all_users) < count and pages_fetched < max_pages:
+        params = dict(base_params)
+        if cursor:
+            params["cursor"] = cursor
+        html, base = await client.fetch("/search", params=params)
+        users, next_cursor = parse_user_search(html, base)
+        if not users:
+            break
+        all_users.extend(users)
+        pages_fetched += 1
+        cursor = next_cursor
+        if not cursor:
+            break
+    return all_users[:count], cursor
 
 
 # ---------------------------------------------------------------------------

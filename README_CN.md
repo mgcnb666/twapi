@@ -13,7 +13,9 @@
 - **自动分页** — 支持 `page=N` 页码和 `count=N` 指定数量获取
 - **获取全部** — `all=true` 获取用户所有推文（安全上限 10000 条）
 - **转发** — 独立 API 获取用户转发推文
+- **用户搜索** — 按关键词搜索 Twitter 用户
 - **统计面板** — 实时 API 调用统计，Web 界面位于 `/dashboard`
+- **结构化日志** — 滚动日志文件记录所有错误和运行事件
 
 ## 系统要求
 
@@ -251,18 +253,42 @@ GET /api/search?q=tesla&page=2
 GET /api/search?q=tesla&all=true
 ```
 
+### 6. 搜索用户
+
+```
+GET /api/search/users?q=关键词
+```
+
+按关键词搜索 Twitter 用户，支持 `page` 和 `count` 分页。
+
+```bash
+# 搜索用户 "elonmusk"
+GET /api/search/users?q=elonmusk
+
+# 获取 50 个匹配用户
+GET /api/search/users?q=bitcoin&count=50
+```
+
 返回：
 ```json
 {
-  "query": "tesla",
-  "tweets": [ ... ],
-  "cursor": "...",
+  "query": "elonmusk",
+  "users": [
+    {
+      "username": "@elonmusk",
+      "display_name": "Elon Musk",
+      "avatar_url": "https://pbs.twimg.com/profile_images/.../photo.jpg",
+      "bio": "Terafab.ai",
+      "verified": true
+    }
+  ],
+  "cursor": "DAAFCgAB...",
   "page": 1,
   "total_fetched": 20
 }
 ```
 
-### 6. 实例健康状态
+### 7. 实例健康状态
 
 ```
 GET /api/health
@@ -282,7 +308,7 @@ GET /api/health
 
 ---
 
-### 7. API 统计
+### 8. API 统计
 
 ```
 GET /api/stats?hours=24
@@ -316,7 +342,7 @@ GET /api/stats?hours=24
 }
 ```
 
-### 8. 最近调用
+### 9. 最近调用
 
 ```
 GET /api/stats/recent?limit=50
@@ -324,7 +350,7 @@ GET /api/stats/recent?limit=50
 
 返回最近的 API 调用记录，包含完整详情（时间戳、状态码、延迟、路径、查询参数等）。
 
-### 9. 统计面板
+### 10. 统计面板
 
 ```
 GET /dashboard
@@ -340,6 +366,17 @@ GET /dashboard
 |---|---|
 | 404 | `{"detail": "Profile card not found – user may not exist"}` |
 | 502 | `{"detail": "Nitter fetch failed: All Nitter instances failed"}` |
+
+## 日志
+
+所有运行事件和错误写入 `logs/` 目录下的滚动日志文件：
+
+| 文件 | 内容 |
+|---|---|
+| `logs/twapi.log` | 所有级别（DEBUG+）— 完整请求追踪 |
+| `logs/error.log` | 仅错误（ERROR+）— 快速问题定位 |
+
+日志滚动：每个文件 5MB，保留 3 个备份。日志包含时间戳、级别、模块名称，错误时包含完整堆栈追踪。
 
 ## 架构
 

@@ -13,7 +13,9 @@ Self-hosted REST API that fetches real-time Twitter/X data through public Nitter
 - **Auto-Pagination** — `page=N`, `count=N`, or `all=true` to fetch everything
 - **Retweets** — dedicated endpoint for user retweeted posts
 - **Fetch All** — `all=true` retrieves all available tweets (safety cap 10,000)
+- **User Search** — search Twitter users by keyword
 - **Statistics Dashboard** — real-time API call tracking with web UI at `/dashboard`
+- **Structured Logging** — rotating log files for all errors and runtime events
 
 ## Requirements
 
@@ -221,7 +223,42 @@ GET /api/search?q=AI&count=80
 GET /api/search?q=tesla&all=true
 ```
 
-### 6. Instance Health
+### 6. Search Users
+
+```
+GET /api/search/users?q=keyword
+```
+
+Search Twitter users by keyword. Supports `page` and `count` pagination.
+
+```bash
+# Search users "elonmusk"
+GET /api/search/users?q=elonmusk
+
+# Get 50 matching users
+GET /api/search/users?q=bitcoin&count=50
+```
+
+Response:
+```json
+{
+  "query": "elonmusk",
+  "users": [
+    {
+      "username": "@elonmusk",
+      "display_name": "Elon Musk",
+      "avatar_url": "https://pbs.twimg.com/profile_images/.../photo.jpg",
+      "bio": "Terafab.ai",
+      "verified": true
+    }
+  ],
+  "cursor": "DAAFCgAB...",
+  "page": 1,
+  "total_fetched": 20
+}
+```
+
+### 7. Instance Health
 
 ```
 GET /api/health
@@ -241,7 +278,7 @@ Response:
 
 ---
 
-### 7. API Statistics
+### 8. API Statistics
 
 ```
 GET /api/stats?hours=24
@@ -275,7 +312,7 @@ Response:
 }
 ```
 
-### 8. Recent Calls
+### 9. Recent Calls
 
 ```
 GET /api/stats/recent?limit=50
@@ -283,7 +320,7 @@ GET /api/stats/recent?limit=50
 
 Returns the most recent API calls with full details (timestamp, status, latency, path, query, etc.).
 
-### 9. Dashboard
+### 10. Dashboard
 
 ```
 GET /dashboard
@@ -299,6 +336,17 @@ Interactive web dashboard with real-time charts, KPI cards, endpoint breakdown, 
 |---|---|
 | 404 | `{"detail": "Profile card not found – user may not exist"}` |
 | 502 | `{"detail": "Nitter fetch failed: All Nitter instances failed"}` |
+
+## Logging
+
+All runtime events and errors are written to rotating log files in `logs/`:
+
+| File | Contents |
+|---|---|
+| `logs/twapi.log` | All log levels (DEBUG+) – full request tracing |
+| `logs/error.log` | Errors only (ERROR+) – quick problem diagnosis |
+
+Log rotation: 5 MB per file, 3 backup files retained. Logs include timestamps, level, module name, and full stack traces for errors.
 
 ## Architecture
 

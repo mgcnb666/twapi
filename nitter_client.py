@@ -22,7 +22,7 @@ from curl_cffi.requests import AsyncSession
 
 from config import settings
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("twapi.nitter_client")
 
 # Instances known to use Cloudflare managed challenges
 CF_INSTANCES = {
@@ -215,13 +215,14 @@ class NitterClient:
         last_exc: Exception | None = None
         tried: set[str] = set()
 
-        for _ in range(settings.max_retries):
+        for attempt in range(settings.max_retries):
             base = self._pick_instance()
             if base in tried:
                 candidates = [u for u, lat in self._health.items() if lat >= 0 and u not in tried]
                 if candidates:
                     base = random.choice(candidates)
             tried.add(base)
+            log.debug("Fetch attempt %d: %s%s", attempt + 1, base, path)
 
             # --- Cloudflare instance: use browser ---
             if self._is_cf_instance(base):
@@ -232,8 +233,10 @@ class NitterClient:
                     async with self._lock:
                         self._health[base] = -1
                     last_exc = RuntimeError(f"{base} CF browser fetch failed")
+                    log.warning("CF browser fetch failed for %s%s", base, path)
                 except Exception as exc:
                     last_exc = exc
+                    log.error("CF browser exception for %s: %s", base, exc)
                     async with self._lock:
                         self._health[base] = -1
                 continue
@@ -256,18 +259,21 @@ class NitterClient:
                         async with self._lock:
                             self._health[base] = -1
                         last_exc = RuntimeError(f"{base} Anubis challenge failed")
+                        log.warning("Anubis challenge failed for %s", base)
                         continue
 
                     if _is_antibot_page(html):
                         async with self._lock:
                             self._health[base] = -1
                         last_exc = RuntimeError(f"{base} returned anti-bot page")
+                        log.warning("Anti-bot page from %s", base)
                         continue
 
                     if resp.status_code >= 500:
                         async with self._lock:
                             self._health[base] = -1
                         last_exc = RuntimeError(f"{base} returned HTTP {resp.status_code}")
+                        log.warning("HTTP %d from %s%s", resp.status_code, base, path)
                         continue
 
                     self._save_cookies(base, session)
@@ -275,9 +281,11 @@ class NitterClient:
 
             except Exception as exc:
                 last_exc = exc
+                log.error("Request exception for %s%s: %s", base, path, exc)
                 async with self._lock:
                     self._health[base] = -1
 
+        log.error("All Nitter instances failed for %s (tried %s)", path, tried)
         raise last_exc or RuntimeError("All Nitter instances failed")
 
     # ---- health check -------------------------------------------------------
@@ -306,7 +314,9 @@ class NitterClient:
                 else:
                     async with self._lock:
                         self._health[url] = -1
-        except Exception:
+                    log.debug("Health check failed for %s: status=%d antibot=%s", url, resp.status_code, _is_antibot_page(html))
+        except Exception as exc:
+            log.debug("Health check exception for %s: %s", url, exc)
             async with self._lock:
                 self._health[url] = -1
 

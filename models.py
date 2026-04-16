@@ -65,6 +65,22 @@ class UserRetweetsResponse(BaseModel):
     total_fetched: int = 0
 
 
+class UserSearchResult(BaseModel):
+    username: str = ""
+    display_name: str = ""
+    avatar_url: str = ""
+    bio: str = ""
+    verified: bool = False
+
+
+class UserSearchResponse(BaseModel):
+    query: str
+    users: list[UserSearchResult]
+    cursor: str = ""
+    page: int = 1
+    total_fetched: int = 0
+
+
 class InstanceHealth(BaseModel):
     url: str
     healthy: bool

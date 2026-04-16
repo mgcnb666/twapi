@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 import threading
@@ -9,6 +10,8 @@ from datetime import datetime, timezone
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+
+log = logging.getLogger("twapi.stats")
 
 DB_PATH = "api_stats.db"
 
@@ -172,6 +175,8 @@ def _classify_endpoint(path: str) -> str:
         if parts[1] == "health":
             return "health"
         if parts[1] == "search":
+            if len(parts) >= 3 and parts[2] == "users":
+                return "search/users"
             return "search"
         if parts[1] == "stats":
             return "stats" if len(parts) == 2 else "stats/" + parts[2]
@@ -217,7 +222,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
                     error=error_msg,
                 )
             except Exception:
-                pass  # never let stats recording break the request
+                log.error("Failed to record stats for %s %s", request.method, path, exc_info=True)
 
 
 stats_tracker = StatsTracker()

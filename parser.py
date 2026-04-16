@@ -1,10 +1,13 @@
 """HTML parser for Nitter pages."""
 
+import logging
 import re
 from urllib.parse import unquote
 
 from bs4 import BeautifulSoup, Tag
-from models import UserProfile, Tweet
+from models import UserProfile, Tweet, UserSearchResult
+
+log = logging.getLogger("twapi.parser")
 
 
 def _text(el: Tag | None, default: str = "") -> str:
@@ -180,6 +183,7 @@ def parse_tweets(html: str, base_url: str) -> tuple[list[Tweet], str]:
         try:
             tweets.append(parse_tweet_item(body, base_url))
         except Exception:
+            log.debug("Failed to parse tweet item, skipping", exc_info=True)
             continue
 
     # pagination cursor – pick the show-more link that contains "cursor="
@@ -207,6 +211,50 @@ def parse_tweet_detail(html: str, base_url: str) -> tuple[Tweet | None, list[Twe
         try:
             replies.append(parse_tweet_item(item, base_url))
         except Exception:
+            log.debug("Failed to parse reply item, skipping", exc_info=True)
             continue
 
     return main_tweet, replies
+
+
+# ---------------------------------------------------------------------------
+# User search results
+# ---------------------------------------------------------------------------
+
+def parse_user_search(html: str, base_url: str) -> tuple[list[UserSearchResult], str]:
+    """Parse user search results page. Returns (users, cursor)."""
+    soup = BeautifulSoup(html, "lxml")
+    users: list[UserSearchResult] = []
+
+    for item in soup.select(".timeline-item"):
+        body = item.select_one(".tweet-body.profile-result")
+        if not body:
+            continue
+        try:
+            username = _text(body.select_one(".username"))
+            display_name = _text(body.select_one(".fullname"))
+            avatar_el = body.select_one("img.avatar")
+            avatar_url = _fix_img_url(_attr(avatar_el, "src"), base_url)
+            bio = _text(body.select_one(".tweet-content"))
+            verified = body.select_one(".verified-icon") is not None
+
+            users.append(UserSearchResult(
+                username=username,
+                display_name=display_name,
+                avatar_url=avatar_url,
+                bio=bio,
+                verified=verified,
+            ))
+        except Exception:
+            log.debug("Failed to parse user search result, skipping", exc_info=True)
+            continue
+
+    # pagination cursor
+    cursor = ""
+    for show_more in soup.select(".show-more a"):
+        href = _attr(show_more, "href")
+        if "cursor=" in href:
+            cursor = href.split("cursor=")[-1].split("&")[0]
+            break
+
+    return users, cursor
