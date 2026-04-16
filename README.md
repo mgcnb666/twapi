@@ -1,7 +1,7 @@
 # TwAPI – 基于 Nitter 的 Twitter API
 
 自托管的 REST API，通过公共 Nitter 实例获取 Twitter/X 实时数据。
-每次请求都返回**最新数据**，不使用缓存。
+
 
 ### 功能特性
 
