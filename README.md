@@ -11,8 +11,9 @@ Self-hosted REST API that fetches real-time Twitter/X data through public Nitter
 - **TLS Fingerprint Impersonation** — `curl_cffi` mimics Chrome 124
 - **Smart Instance Rotation** — latency-weighted selection with automatic health checks
 - **Auto-Pagination** — `page=N`, `count=N`, or `all=true` to fetch everything
-- **Likes & Retweets** — dedicated endpoints for user liked and retweeted posts
+- **Retweets** — dedicated endpoint for user retweeted posts
 - **Fetch All** — `all=true` retrieves all available tweets (safety cap 10,000)
+- **Statistics Dashboard** — real-time API call tracking with web UI at `/dashboard`
 
 ## Requirements
 
@@ -157,22 +158,7 @@ Response:
 }
 ```
 
-### 3. User Likes
-
-```
-GET /api/user/{username}/likes
-```
-
-Fetches tweets the user has liked (from Nitter favorites page). Same pagination parameters as tweets.
-
-> ⚠️ **Note:** Most public Nitter instances do not expose the favorites page (requires server-side auth). This endpoint may return empty results. Works on self-hosted Nitter with guest accounts configured.
-
-```bash
-GET /api/user/elonmusk/likes
-GET /api/user/elonmusk/likes?count=100
-```
-
-### 4. User Retweets
+### 3. User Retweets
 
 ```
 GET /api/user/{username}/retweets
@@ -191,7 +177,7 @@ GET /api/user/elonmusk/retweets?count=50
 GET /api/user/elonmusk/retweets?all=true
 ```
 
-### 5. Tweet Detail
+### 4. Tweet Detail
 
 ```
 GET /api/tweet/{username}/status/{tweet_id}
@@ -216,7 +202,7 @@ Response:
 }
 ```
 
-### 6. Search Tweets
+### 5. Search Tweets
 
 ```
 GET /api/search?q=keyword
@@ -235,7 +221,7 @@ GET /api/search?q=AI&count=80
 GET /api/search?q=tesla&all=true
 ```
 
-### 7. Instance Health
+### 6. Instance Health
 
 ```
 GET /api/health
@@ -252,6 +238,58 @@ Response:
   "total_count": 8
 }
 ```
+
+---
+
+### 7. API Statistics
+
+```
+GET /api/stats?hours=24
+```
+
+Returns aggregated call statistics for the specified time window.
+
+Response:
+```json
+{
+  "total_calls": 150,
+  "success_count": 142,
+  "error_count": 8,
+  "success_rate": 94.7,
+  "avg_latency_ms": 1250.5,
+  "min_latency_ms": 320.0,
+  "max_latency_ms": 8500.0,
+  "by_endpoint": [
+    { "endpoint": "user/tweets", "calls": 80, "success": 76, "avg_ms": 1100.0 }
+  ],
+  "by_status_code": [
+    { "status_code": 200, "count": 142 },
+    { "status_code": 502, "count": 8 }
+  ],
+  "by_hour": [
+    { "hour": "2026-04-17T14:00", "calls": 12, "errors": 1, "avg_ms": 980.0 }
+  ],
+  "top_paths": [
+    { "path": "/api/user/elonmusk/tweets", "calls": 45 }
+  ]
+}
+```
+
+### 8. Recent Calls
+
+```
+GET /api/stats/recent?limit=50
+```
+
+Returns the most recent API calls with full details (timestamp, status, latency, path, query, etc.).
+
+### 9. Dashboard
+
+```
+GET /dashboard
+```
+
+Interactive web dashboard with real-time charts, KPI cards, endpoint breakdown, and call logs. Auto-refreshes every 30 seconds.
 
 ---
 
@@ -277,6 +315,10 @@ Client → FastAPI (port 30192)
            └─ Health checks (every 120s)
            ↓
          Nitter instances → Twitter/X
+           ↓
+         StatsMiddleware → SQLite (api_stats.db)
+           ↓
+         /dashboard (real-time web UI)
 ```
 
 ## Files
@@ -289,4 +331,6 @@ Client → FastAPI (port 30192)
 | `cf_browser.py` | Cloudflare bypass — SeleniumBase UC Chrome worker thread |
 | `parser.py` | HTML → JSON parser |
 | `models.py` | Pydantic response models |
+| `stats.py` | API call statistics tracker (SQLite) + ASGI middleware |
+| `dashboard.py` | Dashboard HTML/CSS/JS frontend |
 | `requirements.txt` | Python dependencies |

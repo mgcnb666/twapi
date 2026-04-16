@@ -12,7 +12,8 @@
 - **智能实例轮换** — 按延迟加权选择，自动健康检查
 - **自动分页** — 支持 `page=N` 页码和 `count=N` 指定数量获取
 - **获取全部** — `all=true` 获取用户所有推文（安全上限 10000 条）
-- **点赞/转发** — 独立 API 获取用户点赞和转发推文
+- **转发** — 独立 API 获取用户转发推文
+- **统计面板** — 实时 API 调用统计，Web 界面位于 `/dashboard`
 
 ## 系统要求
 
@@ -173,38 +174,7 @@ GET /api/user/elonmusk/tweets?all=true
 }
 ```
 
-### 3. 用户点赞
-
-```
-GET /api/user/{username}/likes
-```
-
-获取用户点赞过的推文（来自 Nitter 收藏页面）。
-
-> ⚠️ **注意：** 大多数公共 Nitter 实例不公开收藏页面（需要服务端认证），此端点可能返回空结果。自托管 Nitter 配置 guest 账号后可正常使用。
-
-**分页参数**（同用户推文）：
-
-```bash
-# 获取点赞
-GET /api/user/elonmusk/likes
-
-# 获取最新 100 条点赞
-GET /api/user/elonmusk/likes?count=100
-```
-
-返回：
-```json
-{
-  "user": "elonmusk",
-  "tweets": [ ... ],
-  "cursor": "...",
-  "page": 1,
-  "total_fetched": 20
-}
-```
-
-### 4. 用户转发
+### 3. 用户转发
 
 ```
 GET /api/user/{username}/retweets
@@ -234,7 +204,7 @@ GET /api/user/elonmusk/retweets?all=true
 }
 ```
 
-### 5. 推文详情
+### 4. 推文详情
 
 ```
 GET /api/tweet/{username}/status/{tweet_id}
@@ -259,7 +229,7 @@ GET /api/tweet/{username}/status/{tweet_id}
 }
 ```
 
-### 6. 搜索推文
+### 5. 搜索推文
 
 ```
 GET /api/search?q=关键词
@@ -292,7 +262,7 @@ GET /api/search?q=tesla&all=true
 }
 ```
 
-### 7. 实例健康状态
+### 6. 实例健康状态
 
 ```
 GET /api/health
@@ -309,6 +279,58 @@ GET /api/health
   "total_count": 8
 }
 ```
+
+---
+
+### 7. API 统计
+
+```
+GET /api/stats?hours=24
+```
+
+返回指定时间窗口内的聚合调用统计。
+
+返回：
+```json
+{
+  "total_calls": 150,
+  "success_count": 142,
+  "error_count": 8,
+  "success_rate": 94.7,
+  "avg_latency_ms": 1250.5,
+  "min_latency_ms": 320.0,
+  "max_latency_ms": 8500.0,
+  "by_endpoint": [
+    { "endpoint": "user/tweets", "calls": 80, "success": 76, "avg_ms": 1100.0 }
+  ],
+  "by_status_code": [
+    { "status_code": 200, "count": 142 },
+    { "status_code": 502, "count": 8 }
+  ],
+  "by_hour": [
+    { "hour": "2026-04-17T14:00", "calls": 12, "errors": 1, "avg_ms": 980.0 }
+  ],
+  "top_paths": [
+    { "path": "/api/user/elonmusk/tweets", "calls": 45 }
+  ]
+}
+```
+
+### 8. 最近调用
+
+```
+GET /api/stats/recent?limit=50
+```
+
+返回最近的 API 调用记录，包含完整详情（时间戳、状态码、延迟、路径、查询参数等）。
+
+### 9. 统计面板
+
+```
+GET /dashboard
+```
+
+交互式 Web 仪表板，包含实时图表、KPI 卡片、端点分析和调用日志。每 30 秒自动刷新。
 
 ---
 
@@ -331,10 +353,13 @@ GET /api/health
            ├─ Cloudflare 绕过（Chrome，可选）
            ├─ Cookie 持久化
            ├─ 自动分页（page/count/all）
-           ├─ 点赞/转发 API
            └─ 健康检查（每 120 秒）
            ↓
          Nitter 实例 → Twitter/X
+           ↓
+         StatsMiddleware → SQLite (api_stats.db)
+           ↓
+         /dashboard（实时 Web 面板）
 ```
 
 ## 文件说明
@@ -347,4 +372,6 @@ GET /api/health
 | `cf_browser.py` | Cloudflare 绕过 — SeleniumBase UC Chrome 工作线程 |
 | `parser.py` | HTML→JSON 解析器 |
 | `models.py` | Pydantic 响应模型 |
+| `stats.py` | API 调用统计跟踪器（SQLite）+ ASGI 中间件 |
+| `dashboard.py` | 统计面板 HTML/CSS/JS 前端 |
 | `requirements.txt` | Python 依赖 |

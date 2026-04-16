@@ -57,14 +57,6 @@ class SearchResponse(BaseModel):
     total_fetched: int = 0
 
 
-class UserLikesResponse(BaseModel):
-    user: str
-    tweets: list[Tweet]
-    cursor: str = ""
-    page: int = 1
-    total_fetched: int = 0
-
-
 class UserRetweetsResponse(BaseModel):
     user: str
     tweets: list[Tweet]

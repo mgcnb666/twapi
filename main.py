@@ -7,11 +7,11 @@ Endpoints
 ---------
 GET /api/user/{username}              – user profile
 GET /api/user/{username}/tweets       – user timeline
-GET /api/user/{username}/likes        – user liked tweets
 GET /api/user/{username}/retweets     – user retweets only
 GET /api/tweet/{username}/status/{id} – single tweet + replies
 GET /api/search?q=keyword             – search tweets
 GET /api/health                       – instance health
+GET /dashboard                        – API statistics dashboard
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import math
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
 from config import settings
 from models import (
@@ -28,13 +29,13 @@ from models import (
     SearchResponse,
     TweetDetail,
     Tweet,
-    UserLikesResponse,
     UserProfile,
     UserRetweetsResponse,
     UserTweetsResponse,
 )
 from nitter_client import client
 from parser import parse_tweet_detail, parse_tweets, parse_user_profile
+from stats import stats_tracker, StatsMiddleware
 
 # Nitter returns ~20 tweets per page
 PAGE_SIZE = 20
@@ -117,6 +118,7 @@ async def _fetch_all_tweets(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    stats_tracker.init_db()
     await client.start()
     yield
     await client.close()
@@ -125,9 +127,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="TwAPI",
     description="Twitter/X REST API powered by public Nitter instances",
-    version="1.2.0",
+    version="1.3.0",
     lifespan=lifespan,
 )
+app.add_middleware(StatsMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -138,16 +141,18 @@ app = FastAPI(
 async def root():
     return {
         "name": "TwAPI",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "docs": "/docs",
+        "dashboard": "/dashboard",
         "endpoints": [
             "GET /api/user/{username}",
             "GET /api/user/{username}/tweets?page=1&count=20&all=false",
-            "GET /api/user/{username}/likes?page=1&count=20&all=false",
             "GET /api/user/{username}/retweets?page=1&count=20&all=false",
             "GET /api/tweet/{username}/status/{tweet_id}",
             "GET /api/search?q=keyword&page=1&count=20&all=false",
             "GET /api/health",
+            "GET /api/stats",
+            "GET /dashboard",
         ],
     }
 
@@ -204,53 +209,6 @@ async def get_user_tweets(
 
         tweets, next_cursor = await _fetch_page_n(f"/{username}", None, page)
         return UserTweetsResponse(
-            user=username, tweets=tweets, cursor=next_cursor,
-            page=page, total_fetched=len(tweets),
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
-
-
-@app.get("/api/user/{username}/likes", response_model=UserLikesResponse)
-async def get_user_likes(
-    username: str,
-    page: int = Query(1, ge=1, description="Page number (1-based)"),
-    count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total liked tweets to fetch"),
-    cursor: str = Query("", description="Raw pagination cursor"),
-    all: bool = Query(False, description="Fetch ALL liked tweets"),
-):
-    """Get tweets liked by a user (from Nitter favorites page).
-
-    Supports the same pagination modes as /tweets.
-    """
-    path = f"/{username}/favorites"
-    try:
-        if all:
-            tweets, last_cursor = await _fetch_all_tweets(path, None)
-            return UserLikesResponse(
-                user=username, tweets=tweets, cursor=last_cursor,
-                page=0, total_fetched=len(tweets),
-            )
-
-        if cursor:
-            html, base = await client.fetch(path, params={"cursor": cursor})
-            tweets, next_cursor = parse_tweets(html, base)
-            return UserLikesResponse(
-                user=username, tweets=tweets, cursor=next_cursor,
-                page=0, total_fetched=len(tweets),
-            )
-
-        if count > 0:
-            tweets, last_cursor = await _fetch_tweets_multi(path, None, count)
-            return UserLikesResponse(
-                user=username, tweets=tweets, cursor=last_cursor,
-                page=0, total_fetched=len(tweets),
-            )
-
-        tweets, next_cursor = await _fetch_page_n(path, None, page)
-        return UserLikesResponse(
             user=username, tweets=tweets, cursor=next_cursor,
             page=page, total_fetched=len(tweets),
         )
@@ -393,6 +351,29 @@ async def health_check():
         active_count=active,
         total_count=len(instances),
     )
+
+
+@app.get("/api/stats")
+async def get_stats(
+    hours: int = Query(24, ge=1, le=720, description="Hours of history to include"),
+):
+    """Get API call statistics as JSON."""
+    return stats_tracker.get_summary(hours=hours)
+
+
+@app.get("/api/stats/recent")
+async def get_recent_calls(
+    limit: int = Query(50, ge=1, le=500, description="Number of recent calls"),
+):
+    """Get recent API call log."""
+    return stats_tracker.get_recent(limit=limit)
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """API statistics dashboard."""
+    from dashboard import DASHBOARD_HTML
+    return DASHBOARD_HTML
 
 
 # ---------------------------------------------------------------------------
