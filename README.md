@@ -1,106 +1,95 @@
-# TwAPI – 基于 Nitter 的 Twitter API
+# TwAPI – Twitter API via Nitter
 
-自托管的 REST API，通过公共 Nitter 实例获取 Twitter/X 实时数据。
+[🇨🇳 中文文档](README_CN.md)
 
+Self-hosted REST API that fetches real-time Twitter/X data through public Nitter instances.
 
-### 功能特性
+### Features
 
-- **Anubis 反爬破解** — 自动 PoW 求解器（preact + fast 两种格式）
-- **Cloudflare 挑战绕过** — SeleniumBase UC 模式无头 Chrome（可选）
-- **TLS 指纹伪装** — `curl_cffi` 模拟 Chrome 124 浏览器指纹
-- **智能实例轮换** — 按延迟加权选择，自动健康检查
-- **自动分页** — 支持 `page=N` 页码和 `count=N` 指定数量获取
-- **最多 500 条** — 一次请求获取指定数量的推文（自动翻页）
+- **Anubis Anti-Bot Bypass** — automatic PoW solvers (preact + fast formats)
+- **Cloudflare Challenge Bypass** — SeleniumBase UC mode headless Chrome (optional)
+- **TLS Fingerprint Impersonation** — `curl_cffi` mimics Chrome 124
+- **Smart Instance Rotation** — latency-weighted selection with automatic health checks
+- **Auto-Pagination** — `page=N`, `count=N`, or `all=true` to fetch everything
+- **Likes & Retweets** — dedicated endpoints for user liked and retweeted posts
+- **Fetch All** — `all=true` retrieves all available tweets (safety cap 10,000)
 
-## 系统要求
+## Requirements
 
 ```bash
-# Python 依赖
 pip install -r requirements.txt
 ```
 
-如需启用 Cloudflare 绕过（可选）：
+For Cloudflare bypass (optional):
 ```bash
 apt-get install -y xvfb python3-tk google-chrome-stable
-# 在 config.py 中设置 enable_cf_browser = True
+# Set enable_cf_browser = True in config.py
 ```
 
-## 快速开始
+## Quick Start
 
 ```bash
 python main.py
-# 服务启动在 http://0.0.0.0:30192
+# Server starts at http://0.0.0.0:30192
 ```
 
-## 配置
+## Configuration
 
-编辑 `config.py`：
+Edit `config.py`:
 
 ```python
 @dataclass
 class Settings:
-    port: int = 30192                # 服务端口
-    instances: list[str] = ...       # Nitter 实例列表
-    request_timeout: float = 15.0    # 单次请求超时
-    max_retries: int = 5             # 跨实例重试次数
-    health_check_interval: int = 120 # 健康检查间隔（秒）
-    enable_cf_browser: bool = False  # 启用 Cloudflare 绕过
+    port: int = 30192                # Server port
+    instances: list[str] = ...       # Nitter instance list
+    request_timeout: float = 15.0    # Per-request timeout
+    max_retries: int = 5             # Cross-instance retries
+    health_check_interval: int = 120 # Health check interval (seconds)
+    enable_cf_browser: bool = False  # Enable Cloudflare bypass
 ```
 
-自定义端口：
+Custom port:
 ```python
 settings = Settings(port=8080)
 ```
 
 ---
 
-## 实例状态
+## Instance Status
 
-| 实例 | 保护方式 | 绕过方法 | 状态 |
+| Instance | Protection | Bypass Method | Status |
 |---|---|---|---|
-| xcancel.com | BotD (FingerprintJS) | TLS 指纹伪装 | ✅ 个人页/时间线 |
-| nitter.privacyredirect.com | Anubis (preact) | SHA-256 哈希 | ✅ 所有端点 |
-| nitter.tiekoetter.com | Anubis PoW (fast) | SHA-256 暴力破解 | ✅ 所有端点 |
-| nitter.catsarch.com | Anubis PoW (fast) | SHA-256 暴力破解 | ✅ 所有端点 |
-| lightbrd.com | Cloudflare | Chrome 浏览器（可选） | ⚠️ 需启用 CF 浏览器 |
-| nitter.space | Cloudflare | Chrome 浏览器（可选） | ⚠️ 需启用 CF 浏览器 |
-| nuku.trabun.org | Cloudflare | Chrome 浏览器（可选） | ⚠️ 需启用 CF 浏览器 |
-| nitter.poast.org | 服务器宕机 | N/A | ❌ 503 |
+| xcancel.com | BotD (FingerprintJS) | TLS impersonation | ✅ Profile/timeline |
+| nitter.privacyredirect.com | Anubis (preact) | SHA-256 hash | ✅ All endpoints |
+| nitter.tiekoetter.com | Anubis PoW (fast) | SHA-256 brute-force | ✅ All endpoints |
+| nitter.catsarch.com | Anubis PoW (fast) | SHA-256 brute-force | ✅ All endpoints |
+| lightbrd.com | Cloudflare | Chrome browser (optional) | ⚠️ Needs CF browser |
+| nitter.space | Cloudflare | Chrome browser (optional) | ⚠️ Needs CF browser |
+| nuku.trabun.org | Cloudflare | Chrome browser (optional) | ⚠️ Needs CF browser |
+| nitter.poast.org | Server down | N/A | ❌ 503 |
 
-默认模式下 **4 个实例可用**，启用 CF 浏览器后最多 **7 个实例**。
-
-### 反爬破解原理
-
-**Anubis Preact**（privacyredirect）：从 `<script id="preact_info">` 提取挑战字符串，
-计算 `SHA-256(challenge)` 提交即可获得 JWT cookie（有效期约 7 天）。
-
-**Anubis Fast PoW**（tiekoetter, catsarch）：从 `<script id="anubis_challenge">` 提取 `randomData` 和 `difficulty`，
-暴力搜索 nonce 使得 `SHA-256(randomData + nonce)` 的前 N 位为 0。
-
-**Cloudflare**（lightbrd, nitter.space, nuku.trabun.org）：
-后台 Chrome 浏览器通过 SeleniumBase UC 模式绕过 Turnstile 验证。
-首次解决约需 20-40 秒，后续请求复用会话约 2-3 秒。
+**4 instances available** by default; up to **7** with CF browser enabled.
 
 ---
 
-## API 端点
+## API Endpoints
 
-### 1. 用户资料
+### 1. User Profile
 
 ```
 GET /api/user/{username}
 ```
 
-示例：`GET /api/user/elonmusk`
+Example: `GET /api/user/elonmusk`
 
-返回：
+Response:
 ```json
 {
   "username": "@elonmusk",
   "display_name": "Elon Musk",
   "avatar_url": "https://pbs.twimg.com/profile_images/.../photo.jpg",
   "banner_url": "https://pbs.twimg.com/profile_banners/...",
-  "bio": "Terafab.ai",
+  "bio": "...",
   "location": "",
   "website": "",
   "join_date": "Joined June 2009",
@@ -111,34 +100,36 @@ GET /api/user/{username}
 }
 ```
 
-### 2. 用户推文（时间线）
+### 2. User Tweets (Timeline)
 
 ```
 GET /api/user/{username}/tweets
 ```
 
-**分页参数（三种方式）：**
+**Pagination parameters:**
 
-| 参数 | 说明 | 示例 |
+| Parameter | Description | Example |
 |---|---|---|
-| `page` | 页码（默认 1，每页约 20 条） | `?page=3` 获取第 3 页 |
-| `count` | 指定获取总数（自动翻页，最大 500） | `?count=100` 获取最新 100 条 |
-| `cursor` | 原始游标值（高级用法） | `?cursor=DAAHCgAB...` |
-
-示例：
+| `page` | Page number (default 1, ~20 per page) | `?page=3` |
+| `count` | Total tweets to fetch (max 500, auto-paginates) | `?count=100` |
+| `all` | Fetch ALL available tweets | `?all=true` |
+| `cursor` | Raw cursor (advanced) | `?cursor=DAAHCgAB...` |
 
 ```bash
-# 获取第 1 页（默认）
+# Page 1 (default)
 GET /api/user/elonmusk/tweets
 
-# 获取第 3 页
+# Page 3
 GET /api/user/elonmusk/tweets?page=3
 
-# 获取最新 100 条推文
+# Latest 100 tweets
 GET /api/user/elonmusk/tweets?count=100
+
+# ALL tweets
+GET /api/user/elonmusk/tweets?all=true
 ```
 
-返回：
+Response:
 ```json
 {
   "user": "elonmusk",
@@ -147,8 +138,7 @@ GET /api/user/elonmusk/tweets?count=100
       "id": "2044683867630833961",
       "author": "@elonmusk",
       "display_name": "Elon Musk",
-      "avatar_url": "https://pbs.twimg.com/...",
-      "text": "推文内容...",
+      "text": "Tweet content...",
       "date": "Apr 16, 2026 · 7:46 AM UTC",
       "retweets": "480",
       "quotes": "0",
@@ -167,15 +157,49 @@ GET /api/user/elonmusk/tweets?count=100
 }
 ```
 
-### 3. 推文详情
+### 3. User Likes
+
+```
+GET /api/user/{username}/likes
+```
+
+Fetches tweets the user has liked (from Nitter favorites page). Same pagination parameters as tweets.
+
+> ⚠️ **Note:** Most public Nitter instances do not expose the favorites page (requires server-side auth). This endpoint may return empty results. Works on self-hosted Nitter with guest accounts configured.
+
+```bash
+GET /api/user/elonmusk/likes
+GET /api/user/elonmusk/likes?count=100
+```
+
+### 4. User Retweets
+
+```
+GET /api/user/{username}/retweets
+```
+
+Fetches only retweeted posts from the user's timeline (`is_retweet=true`). Same pagination parameters.
+
+```bash
+# Page 1 of retweets
+GET /api/user/elonmusk/retweets
+
+# Latest 50 retweets
+GET /api/user/elonmusk/retweets?count=50
+
+# ALL retweets
+GET /api/user/elonmusk/retweets?all=true
+```
+
+### 5. Tweet Detail
 
 ```
 GET /api/tweet/{username}/status/{tweet_id}
 ```
 
-示例：`GET /api/tweet/elonmusk/status/2044664503598760073`
+Example: `GET /api/tweet/elonmusk/status/2044664503598760073`
 
-返回：
+Response:
 ```json
 {
   "tweet": {
@@ -187,48 +211,37 @@ GET /api/tweet/{username}/status/{tweet_id}
     "images": ["https://pbs.twimg.com/orig/media/...jpg"]
   },
   "replies": [
-    { "id": "...", "author": "@user", "text": "回复内容..." }
+    { "id": "...", "author": "@user", "text": "Reply content..." }
   ]
 }
 ```
 
-### 4. 搜索推文
+### 6. Search Tweets
 
 ```
-GET /api/search?q=关键词
+GET /api/search?q=keyword
 ```
 
-**分页参数**（同用户推文）：
+Same pagination parameters as tweets (`page`, `count`, `all`, `cursor`).
 
 ```bash
-# 搜索 "tesla" 第 1 页
+# Search "tesla" page 1
 GET /api/search?q=tesla
 
-# 搜索 "AI" 前 80 条结果
+# First 80 results for "AI"
 GET /api/search?q=AI&count=80
 
-# 搜索第 2 页
-GET /api/search?q=tesla&page=2
+# ALL results
+GET /api/search?q=tesla&all=true
 ```
 
-返回：
-```json
-{
-  "query": "tesla",
-  "tweets": [ ... ],
-  "cursor": "...",
-  "page": 1,
-  "total_fetched": 20
-}
-```
-
-### 5. 实例健康状态
+### 7. Instance Health
 
 ```
 GET /api/health
 ```
 
-返回：
+Response:
 ```json
 {
   "instances": [
@@ -242,38 +255,38 @@ GET /api/health
 
 ---
 
-## 错误响应
+## Error Responses
 
-| 状态码 | 示例 |
+| Status | Example |
 |---|---|
 | 404 | `{"detail": "Profile card not found – user may not exist"}` |
 | 502 | `{"detail": "Nitter fetch failed: All Nitter instances failed"}` |
 
-## 架构
+## Architecture
 
 ```
-客户端 → FastAPI (端口 30192)
+Client → FastAPI (port 30192)
            ↓
          NitterClient
-           ├─ 实例轮换（延迟加权）
-           ├─ Anubis PoW 求解器（preact + fast）
-           ├─ TLS 指纹伪装（curl_cffi）
-           ├─ Cloudflare 绕过（Chrome，可选）
-           ├─ Cookie 持久化
-           ├─ 自动分页（page/count）
-           └─ 健康检查（每 120 秒）
+           ├─ Instance rotation (latency-weighted)
+           ├─ Anubis PoW solvers (preact + fast)
+           ├─ TLS fingerprint (curl_cffi)
+           ├─ Cloudflare bypass (Chrome, optional)
+           ├─ Cookie persistence
+           ├─ Auto-pagination (page/count/all)
+           └─ Health checks (every 120s)
            ↓
-         Nitter 实例 → Twitter/X
+         Nitter instances → Twitter/X
 ```
 
-## 文件说明
+## Files
 
-| 文件 | 说明 |
+| File | Description |
 |---|---|
-| `main.py` | FastAPI 应用、路由、分页逻辑、入口 |
-| `config.py` | 配置（端口、实例、超时、CF 开关） |
-| `nitter_client.py` | HTTP 客户端、实例轮换、Anubis 求解、CF 集成 |
-| `cf_browser.py` | Cloudflare 绕过 — SeleniumBase UC Chrome 工作线程 |
-| `parser.py` | HTML→JSON 解析器 |
-| `models.py` | Pydantic 响应模型 |
-| `requirements.txt` | Python 依赖 |
+| `main.py` | FastAPI app, routes, pagination logic, entry point |
+| `config.py` | Settings (port, instances, timeouts, CF toggle) |
+| `nitter_client.py` | HTTP client, instance rotation, Anubis solver, CF integration |
+| `cf_browser.py` | Cloudflare bypass — SeleniumBase UC Chrome worker thread |
+| `parser.py` | HTML → JSON parser |
+| `models.py` | Pydantic response models |
+| `requirements.txt` | Python dependencies |
