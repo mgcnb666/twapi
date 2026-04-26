@@ -6,6 +6,7 @@ import logging
 import os
 import sqlite3
 import time
+import asyncio
 import threading
 from datetime import datetime, timezone
 
@@ -26,6 +27,7 @@ class StatsTracker:
 
     def __init__(self) -> None:
         self._local = threading.local()
+        self._lock = asyncio.Lock()
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -60,7 +62,7 @@ class StatsTracker:
         """)
         conn.commit()
 
-    def record(
+    async def record(
         self,
         *,
         method: str,
@@ -74,8 +76,9 @@ class StatsTracker:
     ) -> None:
         endpoint = _classify_endpoint(path)
         ts = datetime.now(timezone.utc).isoformat()
-        conn = self._conn()
-        conn.execute(
+        async with self._lock:
+            conn = self._conn()
+            conn.execute(
             """INSERT INTO api_calls
                (timestamp, method, path, endpoint, query, status_code,
                 latency_ms, client_ip, user_agent, error)
@@ -216,7 +219,7 @@ class StatsMiddleware(BaseHTTPMiddleware):
         finally:
             latency = (time.monotonic() - t0) * 1000
             try:
-                stats_tracker.record(
+                await stats_tracker.record(
                     method=request.method,
                     path=path,
                     query=str(request.url.query) if request.url.query else "",

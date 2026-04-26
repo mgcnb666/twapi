@@ -99,6 +99,9 @@ class CloudflareBrowser:
                 break
 
             url, result = item
+            if result.get("cancelled"):
+                result["done"].set()
+                continue
             base = _base(url)
             try:
                 if base not in solved:
@@ -150,10 +153,13 @@ class CloudflareBrowser:
             return None
         if not self._ready.wait(timeout=30):
             return None
-        result: dict = {"html": None, "done": threading.Event()}
+        result: dict = {"html": None, "done": threading.Event(), "cancelled": False}
         self._q.put((url, result))
-        result["done"].wait(timeout=timeout)
-        return result["html"]
+        if result["done"].wait(timeout=timeout):
+            return result["html"]
+        # Timeout - mark as cancelled so worker can skip
+        result["cancelled"] = True
+        return None
 
     def is_available(self) -> bool:
         return self._started and self._ready.is_set()
