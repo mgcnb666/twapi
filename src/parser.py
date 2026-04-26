@@ -87,8 +87,13 @@ def parse_tweet_item(item: Tag, base_url: str) -> Tweet:
     # The item may be .tweet-body inside .timeline-item
     # Walk up to timeline-item to find .tweet-link sibling
     parent = item
+    max_depth = 20  # Guard against infinite loop / malformed DOM
+    depth = 0
     while parent and "timeline-item" not in (parent.get("class") or []):
-        parent = parent.parent  # type: ignore[assignment]
+        parent = parent.parent
+        depth += 1
+        if depth >= max_depth:
+            break
 
     is_retweet = item.select_one(".retweet-header") is not None
     is_pinned = item.select_one(".pinned") is not None
@@ -103,14 +108,18 @@ def parse_tweet_item(item: Tag, base_url: str) -> Tweet:
     text = _text(item.select_one(".tweet-content"))
     date = _attr(item.select_one(".tweet-date a"), "title") or _text(item.select_one(".tweet-date a"))
 
-    # tweet link / id – may be sibling of .tweet-body in .timeline-item
+    # tweet link / id – robust regex extraction
     link_el = item.select_one(".tweet-link")
     if not link_el and parent:
         link_el = parent.select_one("a.tweet-link")
     link = _attr(link_el, "href") if link_el else ""
     # strip fragment (#m)
     link_clean = link.split("#")[0] if link else ""
-    tweet_id = link_clean.rstrip("/").split("/")[-1] if link_clean else ""
+    tweet_id = ""
+    if link_clean:
+        m = re.search(r"/status/(\d+)", link_clean)
+        if m:
+            tweet_id = m.group(1)
 
     # stats – xcancel structure: <span class="tweet-stat"><div class="icon-container"><span class="icon-X"></span> NUM</div></span>
     stat_container = item.select(".tweet-stat")

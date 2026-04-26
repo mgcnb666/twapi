@@ -92,6 +92,8 @@ class NitterClient:
         self._lock = asyncio.Lock()
         self._cookies: dict[str, dict[str, str]] = {u: {} for u in self._instances}
         self._cf_browser = None  # lazy import
+        self._health_task: asyncio.Task | None = None
+        self._total_fetch_timeout: float = 60.0
 
         # Global concurrency limit across all instances
         self._global_sem = asyncio.Semaphore(settings.max_concurrent_requests)
@@ -112,7 +114,7 @@ class NitterClient:
                 pass
         # Pre-warm connection pools
         await asyncio.gather(*(self._warm_pool(u) for u in self._instances), return_exceptions=True)
-        asyncio.create_task(self._health_loop())
+        self._health_task = asyncio.create_task(self._health_loop())
 
     async def _warm_pool(self, instance: str) -> None:
         """Initialize persistent session for an instance."""
@@ -137,6 +139,12 @@ class NitterClient:
             self._cf_browser = None
 
     async def close(self) -> None:
+        if self._health_task:
+            self._health_task.cancel()
+            try:
+                await self._health_task
+            except asyncio.CancelledError:
+                pass
         for session in self._sessions.values():
             if session:
                 try:
@@ -153,8 +161,6 @@ class NitterClient:
         s = AsyncSession(
             impersonate="chrome124",
             timeout=settings.fetch_timeout,
-            # Connection pooling settings
-            # http2=True,  # curl_cffi 新版本不支持此参数
         )
         for name, val in self._cookies.get(instance, {}).items():
             s.cookies.set(name, val)
@@ -172,6 +178,21 @@ class NitterClient:
         stored = self._cookies.setdefault(instance, {})
         for name, val in session.cookies.items():
             stored[name] = val
+        # Limit cookie size per instance to prevent unbounded growth
+        if len(stored) > 50:
+            # Remove oldest entries (simple: keep last 50)
+            keys = list(stored.keys())
+            for k in keys[:-50]:
+                del stored[k]
+
+    def _close_and_remove_session(self, instance: str) -> None:
+        """Force-close a session and remove it from the pool."""
+        session = self._sessions.pop(instance, None)
+        if session:
+            try:
+                asyncio.get_event_loop().create_task(session.close())
+            except Exception:
+                pass
 
     # ---- instance selection -------------------------------------------------
 
@@ -223,14 +244,8 @@ class NitterClient:
         return redir + "&result=" + result, ""
 
     @staticmethod
-    def _solve_anubis_fast(html: str, path: str) -> tuple[str, dict[str, str]] | None:
-        m = re.search(r'id="anubis_challenge"[^>]*>(\{.*?\})\s*<', html, re.DOTALL)
-        if not m:
-            return None
-        try:
-            cdata = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            return None
+    def _solve_anubis_fast_sync(cdata: dict, path: str) -> tuple[str, dict[str, str]] | None:
+        """Synchronous CPU-bound PoW solver (run in executor)."""
         rules = cdata.get("rules", {})
         challenge = cdata.get("challenge", {})
         difficulty = rules.get("difficulty", challenge.get("difficulty", 1))
@@ -240,10 +255,13 @@ class NitterClient:
             return None
 
         t0 = time.time()
+        deadline = t0 + 8.0  # max 8 seconds
         full_bytes = difficulty // 2
         check_nibble = difficulty % 2 != 0
 
         for nonce in range(10_000_000):
+            if time.time() > deadline:
+                return None
             h = hashlib.sha256((random_data + str(nonce)).encode()).digest()
             ok = all(h[i] == 0 for i in range(full_bytes))
             if ok and check_nibble and (h[full_bytes] >> 4) != 0:
@@ -272,7 +290,24 @@ class NitterClient:
             self._save_cookies(base, session)
             return True
 
-        fast = self._solve_anubis_fast(html, path)
+        m = re.search(r'id="anubis_challenge"[^>]*>(\{.*?\})\s*<', html, re.DOTALL)
+        if not m:
+            return False
+        try:
+            cdata = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            return False
+
+        loop = asyncio.get_event_loop()
+        try:
+            fast = await asyncio.wait_for(
+                loop.run_in_executor(None, self._solve_anubis_fast_sync, cdata, "/" + path.lstrip("/")),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning("Anubis fast PoW timed out for %s", base)
+            return False
+
         if fast:
             url_path, params = fast
             await session.get(
@@ -370,29 +405,26 @@ class NitterClient:
             except Exception as exc:
                 log.error("Request exception for %s%s: %s", base, path, exc)
                 await self._circuit_breakers[base].record_failure()
+                # Force-close session on repeated failures to prevent stale connections
+                cb = self._circuit_breakers[base]
+                if cb.failures >= cb.fail_threshold - 1:
+                    self._close_and_remove_session(base)
                 return None
 
     async def fetch(self, path: str, params: dict[str, Any] | None = None) -> tuple[str, str]:
-        """High-concurrency fetch with parallel instance racing.
-        
-        Fetches from multiple healthy instances concurrently and returns
-        the first successful response.
-        """
+        """High-concurrency fetch with parallel instance racing."""
         async with self._global_sem:
-            # Get top healthy instances for parallel fetch
             instances = await self._get_healthy_instances(count=3)
             if not instances:
                 instances = list(self._instances)
 
-            # Race: fetch from multiple instances concurrently
             tasks = [
                 asyncio.create_task(self._fetch_single(inst, path, params))
                 for inst in instances
             ]
 
-            # Wait for first successful result
             pending = set(tasks)
-            last_error = None
+            errors: list[Exception] = []
             while pending:
                 done, pending = await asyncio.wait(
                     pending, return_when=asyncio.FIRST_COMPLETED
@@ -401,29 +433,38 @@ class NitterClient:
                     try:
                         result = task.result()
                         if result is not None:
-                            # Cancel remaining tasks
+                            # Cancel remaining tasks and await to suppress CancelledError
                             for t in pending:
                                 t.cancel()
+                            if pending:
+                                await asyncio.gather(*pending, return_exceptions=True)
                             return result
                     except Exception as exc:
-                        last_error = exc
+                        errors.append(exc)
                         log.warning("Instance failed for %s: %s", path, exc)
 
             # All failed
-            log.error("All Nitter instances failed for %s (tried %s). Last error: %s", path, instances, last_error)
+            last_error = errors[-1] if errors else None
+            log.error("All Nitter instances failed for %s (tried %s). Errors: %s",
+                      path, instances, [str(e) for e in errors])
             raise last_error or RuntimeError("All Nitter instances failed")
 
-    # ---- parallel batch fetch ------------------------------------------------
+    # ---- parallel batch fetch -----------------------------------------------
 
     async def fetch_parallel(
         self,
         requests: list[tuple[str, dict[str, Any] | None]],
     ) -> list[tuple[str, str] | None]:
-        """Fetch multiple pages in parallel. 
-        
+        """Fetch multiple pages in parallel.
         requests: list of (path, params) tuples
         Returns: list of (html, base) or None results
         """
+        # DoS protection: limit request batch size
+        MAX_PARALLEL = 50
+        if len(requests) > MAX_PARALLEL:
+            log.warning("fetch_parallel batch truncated from %d to %d", len(requests), MAX_PARALLEL)
+            requests = requests[:MAX_PARALLEL]
+
         async with self._global_sem:
             # Distribute requests across instances
             instances = await self._get_healthy_instances(count=min(len(requests), 5))
@@ -452,13 +493,14 @@ class NitterClient:
         try:
             session = self._get_session(url)
             t0 = time.monotonic()
-            resp = await session.get(url.rstrip("/") + "/elonmusk", timeout=8.0)
+            # Use root path instead of hardcoded user for health check
+            resp = await session.get(url.rstrip("/") + "/", timeout=8.0)
             html = resp.text
 
             if _is_anubis_page(html):
-                solved = await self._try_solve_anubis(session, url, "/elonmusk", html)
+                solved = await self._try_solve_anubis(session, url, "/", html)
                 if solved:
-                    resp = await session.get(url.rstrip("/") + "/elonmusk", timeout=8.0)
+                    resp = await session.get(url.rstrip("/") + "/", timeout=8.0)
                     html = resp.text
                     self._save_cookies(url, session)
 
@@ -487,7 +529,10 @@ class NitterClient:
                 await asyncio.gather(*(self._check_one(u) for u in self._instances))
             except Exception:
                 pass
-            await asyncio.sleep(settings.health_check_interval)
+            try:
+                await asyncio.sleep(settings.health_check_interval)
+            except asyncio.CancelledError:
+                break
 
 
 # ---------------------------------------------------------------------------

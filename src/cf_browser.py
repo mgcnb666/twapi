@@ -36,11 +36,15 @@ class CloudflareBrowser:
             os.remove(lock)
         except FileNotFoundError:
             pass
+        # Start Xvfb with isolated DISPLAY env (do NOT mutate os.environ globally)
+        xvfb_env = dict(os.environ)
+        xvfb_env["DISPLAY"] = _DISPLAY
         self._xvfb = subprocess.Popen(
             ["Xvfb", _DISPLAY, "-screen", "0", "1920x1080x24"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=xvfb_env,
         )
-        os.environ["DISPLAY"] = _DISPLAY
+        # Give Xvfb time to start
         time.sleep(0.5)
         self._thread = threading.Thread(target=self._worker, daemon=True, name="cf-browser")
         self._thread.start()
@@ -65,8 +69,15 @@ class CloudflareBrowser:
         sb = None
         solved: set[str] = set()
 
+        # Build SB kwargs – consistent headed/headless config
+        sb_kwargs = {
+            "uc": True,
+            "headed": False,   # Use headless for server environments
+            "headless": True,  # Explicitly headless
+        }
+
         try:
-            sb_ctx = SB(uc=True, headed=True, headless=False)
+            sb_ctx = SB(**sb_kwargs)
             sb = sb_ctx.__enter__()
             self._ready.set()
             log.info("CloudflareBrowser: Chrome ready")
@@ -114,7 +125,7 @@ class CloudflareBrowser:
                 except Exception:
                     pass
                 try:
-                    sb_ctx = SB(uc=True, headed=True, headless=False)
+                    sb_ctx = SB(**sb_kwargs)
                     sb = sb_ctx.__enter__()
                     solved.clear()
                     log.info("Browser restarted")

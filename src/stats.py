@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import time
 import threading
@@ -13,7 +14,8 @@ from starlette.requests import Request
 
 log = logging.getLogger("twapi.stats")
 
-DB_PATH = "api_stats.db"
+# Absolute path to DB (no longer depends on cwd)
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_stats.db")
 
 # Paths to exclude from tracking (internal / static)
 _SKIP_PATHS = {"/docs", "/openapi.json", "/redoc", "/favicon.ico", "/dashboard"}
@@ -82,8 +84,6 @@ class StatsTracker:
 
     def get_summary(self, *, hours: int = 24) -> dict:
         conn = self._conn()
-        cutoff = datetime.now(timezone.utc).isoformat()[: -(len("2026-04-16T12:00:00+00:00") - len("2026-04-16T"))]
-        # Simpler: just use SQL datetime functions
         rows = conn.execute(
             """SELECT
                  COUNT(*)                                     AS total_calls,
@@ -181,10 +181,11 @@ def _classify_endpoint(path: str) -> str:
             return "search"
         if parts[1] == "stats":
             return "stats" if len(parts) == 2 else "stats/" + parts[2]
-        if parts[1] == "user" and len(parts) >= 3:
+        if parts[1] == "user":
             if len(parts) == 3:
                 return "user/profile"
-            return f"user/{parts[3]}"  # tweets, retweets
+            if len(parts) >= 4:
+                return f"user/{parts[3]}"
         if parts[1] == "tweet":
             return "tweet/detail"
     return path

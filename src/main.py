@@ -5,6 +5,7 @@ import logging
 import logging.handlers
 import math
 import os
+import re
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
@@ -89,11 +90,8 @@ def _effective_max_pages(count: int) -> int:
 
 def _safe_username(value: str) -> str:
     """Strip path separators and encode remaining chars."""
-    # Remove any slash, backslash, or null byte to prevent traversal
     cleaned = value.replace("/", "").replace("\\", "").replace("\x00", "")
-    # Remove leading @ if present to avoid double @ in responses
     cleaned = cleaned.lstrip("@")
-    # URL-encode anything else that could be special in a path segment
     return quote(cleaned, safe="")
 
 
@@ -106,6 +104,35 @@ def _safe_tweet_id(value: str) -> str:
 def _safe_cursor(value: str) -> str:
     """Cursor is usually base64-ish; still sanitise separators."""
     return value.replace("/", "").replace("\\", "").replace("\x00", "")
+
+
+# ---------------------------------------------------------------------------
+# Input validation helpers
+# ---------------------------------------------------------------------------
+
+_TWITTER_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+_TWITTER_TWEET_ID_RE = re.compile(r"^\d{10,20}$")
+
+
+def _validate_username(value: str) -> str:
+    """Validate Twitter username format."""
+    cleaned = value.lstrip("@")
+    if not _TWITTER_USERNAME_RE.match(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid username format: '{value}'. Must be 1-15 alphanumeric chars or underscores.",
+        )
+    return cleaned
+
+
+def _validate_tweet_id(value: str) -> str:
+    """Validate tweet ID format."""
+    if not _TWITTER_TWEET_ID_RE.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tweet ID format: '{value}'. Must be 10-20 digits.",
+        )
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +153,6 @@ async def _fetch_tweets_multi(
     max_pages = _effective_max_pages(count)
 
     if settings.enable_parallel_pagination and max_pages > 1:
-        # Parallel page fetching for first batch
         batch_size = min(settings.max_parallel_pages, max_pages)
         requests = []
         for i in range(batch_size):
@@ -150,7 +176,6 @@ async def _fetch_tweets_multi(
             if not cursor:
                 break
 
-    # Sequential fallback for remaining pages
     while len(all_tweets) < count and pages_fetched < max_pages:
         params = dict(extra_params or {})
         if cursor:
@@ -190,13 +215,10 @@ async def _fetch_all_tweets(
             if i == 0 and cursor:
                 params["cursor"] = cursor
             elif i > 0:
-                # For parallel pages after first, we'd need cursors
-                # This is simplified - sequential is more reliable for pagination
                 break
             requests.append((path, params or None))
 
         if len(requests) == 1:
-            # Sequential mode
             html, base = await client.fetch(path, params=requests[0][1])
             tweets, next_cursor = parse_tweets(html, base)
             if not tweets:
@@ -209,7 +231,6 @@ async def _fetch_all_tweets(
             if not cursor:
                 break
         else:
-            # Parallel mode (only for first batch without cursor dependency)
             results = await client.fetch_parallel(requests)
             for html, base in results:
                 if html is None:
@@ -354,7 +375,8 @@ async def root():
 @app.get("/api/user/{username}", response_model=UserProfile)
 async def get_user_profile(username: str):
     """Get a Twitter user's profile information."""
-    safe = _safe_username(username)
+    validated = _validate_username(username)
+    safe = _safe_username(validated)
     try:
         html, base = await client.fetch(f"/{safe}")
         return parse_user_profile(html, base)
@@ -375,7 +397,8 @@ async def get_user_tweets(
     all: bool = Query(False, description="Fetch ALL tweets (ignores page/count limits)"),
 ):
     """Get a user's tweets with high-concurrency pagination."""
-    safe_user = _safe_username(username)
+    validated = _validate_username(username)
+    safe_user = _safe_username(validated)
     safe_cursor = _safe_cursor(cursor)
     try:
         if all:
@@ -421,7 +444,8 @@ async def get_user_retweets(
     all: bool = Query(False, description="Fetch ALL retweets"),
 ):
     """Get a user's retweets (filtered from timeline)."""
-    safe_user = _safe_username(username)
+    validated = _validate_username(username)
+    safe_user = _safe_username(validated)
     safe_cursor = _safe_cursor(cursor)
     try:
         if all:
@@ -467,8 +491,10 @@ async def get_user_retweets(
 @app.get("/api/tweet/{username}/status/{tweet_id}", response_model=TweetDetail)
 async def get_tweet(username: str, tweet_id: str):
     """Get a single tweet and its replies."""
-    safe_user = _safe_username(username)
-    safe_id = _safe_tweet_id(tweet_id)
+    validated_user = _validate_username(username)
+    validated_id = _validate_tweet_id(tweet_id)
+    safe_user = _safe_username(validated_user)
+    safe_id = _safe_tweet_id(validated_id)
     try:
         html, base = await client.fetch(f"/{safe_user}/status/{safe_id}")
         main_tweet, replies = parse_tweet_detail(html, base)
@@ -601,8 +627,20 @@ async def get_recent_calls(
     return stats_tracker.get_recent(limit=limit)
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
 async def dashboard():
     """API statistics dashboard."""
     from dashboard import DASHBOARD_HTML
     return DASHBOARD_HTML
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+    host = os.getenv("TWAPI_HOST", "0.0.0.0")
+    port = int(os.getenv("TWAPI_PORT", str(settings.port)))
+    workers = int(os.getenv("TWAPI_WORKERS", "1"))
+    uvicorn.run("main:app", host=host, port=port, workers=workers)
