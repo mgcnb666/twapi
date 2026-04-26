@@ -142,7 +142,7 @@ def _validate_query(value: str) -> str:
     if len(cleaned) > _MAX_QUERY_LEN:
         raise HTTPException(
             status_code=400,
-            detail=f"Query too long: {len(cleaned)} > {_MAX_QUERY_LEN} chars.",
+            detail="Query too long. Maximum allowed is 200 characters.",
         )
     return cleaned
 
