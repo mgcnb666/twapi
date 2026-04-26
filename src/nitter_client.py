@@ -109,8 +109,8 @@ class NitterClient:
         if settings.enable_cf_browser:
             try:
                 asyncio.get_event_loop().run_in_executor(None, self._init_cf_browser)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("Failed to start CF browser: %s", exc)
         # Pre-warm connection pools
         await asyncio.gather(*(self._warm_pool(u) for u in self._instances), return_exceptions=True)
         self._health_task = asyncio.create_task(self._health_loop())
@@ -535,8 +535,8 @@ class NitterClient:
         while True:
             try:
                 await asyncio.gather(*(self._check_one(u) for u in self._instances))
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("Health check cycle failed: %s", exc)
             try:
                 await asyncio.sleep(settings.health_check_interval)
             except asyncio.CancelledError:
