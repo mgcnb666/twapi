@@ -381,6 +381,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(StatsMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 
