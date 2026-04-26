@@ -77,25 +77,6 @@ async def main():
 asyncio.run(main())
 ```
 
-## Batch Queries
-
-```python
-from batch_client import BatchTwAPIClient
-
-async def main():
-    client = BatchTwAPIClient("http://localhost:30192")
-    
-    # Batch user lookup (10 concurrent)
-    users = ["elonmusk", "github", "twitter", "google"]
-    results = await client.batch_get_users(users, concurrent=10)
-    
-    # Bulk search (20 workers)
-    queries = ["python", "ai", "ml", "data"]
-    results = await client.bulk_search(queries, count=20, workers=20)
-    
-    await client.close()
-```
-
 ## Configuration
 
 Edit `config.py`:
@@ -169,8 +150,6 @@ twapi/
 │   ├── dashboard.py            # Stats dashboard HTML
 │   └── cf_browser.py           # Cloudflare browser
 ├── twapi_client.py             # Simple async client
-├── batch_client.py             # Batch query client
-├── benchmark.py                # Performance testing
 ├── README.md                   # This file
 ├── README_CN.md                # Chinese README
 ├── SKILL.md                    # AI Skill documentation
