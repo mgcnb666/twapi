@@ -397,7 +397,7 @@ async def get_user_profile(username: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         log.error("Failed to fetch profile for %s: %s", username, e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
+        raise HTTPException(status_code=502, detail="Nitter fetch failed. Please try again later.")
 
 
 @app.get("/api/user/{username}/tweets", response_model=UserTweetsResponse)
@@ -444,7 +444,7 @@ async def get_user_tweets(
         raise
     except Exception as e:
         log.error("Failed to fetch tweets for %s: %s", username, e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
+        raise HTTPException(status_code=502, detail="Nitter fetch failed. Please try again later.")
 
 
 @app.get("/api/user/{username}/retweets", response_model=UserRetweetsResponse)
@@ -497,7 +497,7 @@ async def get_user_retweets(
         raise
     except Exception as e:
         log.error("Failed to fetch retweets for %s: %s", username, e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
+        raise HTTPException(status_code=502, detail="Nitter fetch failed. Please try again later.")
 
 
 @app.get("/api/tweet/{username}/status/{tweet_id}", response_model=TweetDetail)
@@ -518,7 +518,7 @@ async def get_tweet(username: str, tweet_id: str):
         raise
     except Exception as e:
         log.error("Failed to fetch tweet %s/status/%s: %s", username, tweet_id, e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
+        raise HTTPException(status_code=502, detail="Nitter fetch failed. Please try again later.")
 
 
 @app.get("/api/search", response_model=SearchResponse)
@@ -566,7 +566,7 @@ async def search_tweets(
         raise
     except Exception as e:
         log.error("Search failed for q=%s: %s", q, e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
+        raise HTTPException(status_code=502, detail="Nitter fetch failed. Please try again later.")
 
 
 @app.get("/api/search/users", response_model=UserSearchResponse)
@@ -606,7 +606,7 @@ async def search_users(
         raise
     except Exception as e:
         log.error("User search failed for q=%s: %s", q, e, exc_info=True)
-        raise HTTPException(status_code=502, detail=f"Nitter fetch failed: {e}")
+        raise HTTPException(status_code=502, detail="Nitter fetch failed. Please try again later.")
 
 
 @app.get("/api/health", response_model=HealthResponse)
