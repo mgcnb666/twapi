@@ -156,10 +156,11 @@ class StatsTracker:
         }
 
     def get_recent(self, *, limit: int = 50) -> list[dict]:
+        """Return recent calls with sensitive fields redacted."""
         conn = self._conn()
         rows = conn.execute(
             """SELECT timestamp, method, path, endpoint, query,
-                      status_code, latency_ms, client_ip, error
+                      status_code, latency_ms, error
                FROM api_calls ORDER BY id DESC LIMIT ?""",
             (limit,),
         ).fetchall()

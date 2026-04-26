@@ -23,6 +23,17 @@ class Settings:
     max_retries: int = 5
     health_check_interval: int = 120  # seconds
     enable_cf_browser: bool = False   # enable Cloudflare bypass (requires Chrome + Xvfb)
+    
+    # === High Concurrency Settings ===
+    max_concurrent_requests: int = 1000  # global semaphore limit
+    instance_concurrent_limit: int = 50  # per-instance semaphore limit
+    connection_pool_size: int = 100      # per-instance connection pool
+    fetch_timeout: float = 10.0          # timeout for individual fetch
+    circuit_breaker_failures: int = 5    # failures before marking unhealthy
+    circuit_breaker_recovery: float = 30.0  # seconds before retrying unhealthy instance
+    enable_parallel_pagination: bool = True  # fetch multiple pages concurrently
+    max_parallel_pages: int = 5          # max pages to fetch in parallel
+    bulk_search_workers: int = 20        # concurrent workers for bulk search
 
 
 settings = Settings()

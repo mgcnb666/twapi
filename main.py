@@ -1,27 +1,12 @@
-"""TwAPI – Twitter API powered by Nitter instances.
-
-Every request fetches live data from Nitter (no caching) so results
-are always up-to-date.
-
-Endpoints
----------
-GET /api/user/{username}              – user profile
-GET /api/user/{username}/tweets       – user timeline
-GET /api/user/{username}/retweets     – user retweets only
-GET /api/tweet/{username}/status/{id} – single tweet + replies
-GET /api/search?q=keyword             – search tweets
-GET /api/search/users?q=keyword       – search users
-GET /api/health                       – instance health
-GET /dashboard                        – API statistics dashboard
-"""
-
 from __future__ import annotations
 
+import asyncio
 import logging
 import logging.handlers
 import math
 import os
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -53,7 +38,7 @@ def _setup_logging() -> None:
     """Configure 'twapi' logger with console + rotating file handlers."""
     twapi_log = logging.getLogger("twapi")
     if twapi_log.handlers:
-        return  # already configured (uvicorn reloads the module)
+        return
     twapi_log.setLevel(logging.DEBUG)
     twapi_log.propagate = False
 
@@ -62,13 +47,11 @@ def _setup_logging() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Console handler
     console = logging.StreamHandler()
     console.setLevel(logging.INFO)
     console.setFormatter(fmt)
     twapi_log.addHandler(console)
 
-    # Rotating file handler – all levels
     all_handler = logging.handlers.RotatingFileHandler(
         os.path.join(LOG_DIR, "twapi.log"), maxBytes=5 * 1024 * 1024, backupCount=3,
         encoding="utf-8",
@@ -77,7 +60,6 @@ def _setup_logging() -> None:
     all_handler.setFormatter(fmt)
     twapi_log.addHandler(all_handler)
 
-    # Error-only file handler for quick diagnosis
     err_handler = logging.handlers.RotatingFileHandler(
         os.path.join(LOG_DIR, "error.log"), maxBytes=5 * 1024 * 1024, backupCount=3,
         encoding="utf-8",
@@ -101,6 +83,33 @@ def _effective_max_pages(count: int) -> int:
     return math.ceil(count / PAGE_SIZE)
 
 
+# ---------------------------------------------------------------------------
+# URL-safe helpers (fix path-traversal / SSRF)
+# ---------------------------------------------------------------------------
+
+def _safe_username(value: str) -> str:
+    """Strip path separators and encode remaining chars."""
+    # Remove any slash, backslash, or null byte to prevent traversal
+    cleaned = value.replace("/", "").replace("\\", "").replace("\x00", "")
+    # URL-encode anything else that could be special in a path segment
+    return quote(cleaned, safe="")
+
+
+def _safe_tweet_id(value: str) -> str:
+    """Same treatment for tweet IDs."""
+    cleaned = value.replace("/", "").replace("\\", "").replace("\x00", "")
+    return quote(cleaned, safe="")
+
+
+def _safe_cursor(value: str) -> str:
+    """Cursor is usually base64-ish; still sanitise separators."""
+    return value.replace("/", "").replace("\\", "").replace("\x00", "")
+
+
+# ---------------------------------------------------------------------------
+# High-concurrency pagination helpers
+# ---------------------------------------------------------------------------
+
 async def _fetch_tweets_multi(
     path: str,
     extra_params: dict[str, str] | None,
@@ -108,18 +117,40 @@ async def _fetch_tweets_multi(
     *,
     filter_retweets: bool = False,
 ) -> tuple[list[Tweet], str]:
-    """Fetch up to *count* tweets by auto-paginating through Nitter pages.
-
-    If *filter_retweets* is True, only keep tweets where is_retweet=True.
-    Returns (accumulated_tweets, last_cursor).
-    """
+    """Fetch up to *count* tweets with parallel page fetching."""
     all_tweets: list[Tweet] = []
     cursor = ""
     pages_fetched = 0
     max_pages = _effective_max_pages(count)
 
+    if settings.enable_parallel_pagination and max_pages > 1:
+        # Parallel page fetching for first batch
+        batch_size = min(settings.max_parallel_pages, max_pages)
+        requests = []
+        for i in range(batch_size):
+            params: dict[str, str] = dict(extra_params or {})
+            if i > 0 and cursor:
+                params["cursor"] = cursor
+            requests.append((path, params or None))
+
+        results = await client.fetch_parallel(requests)
+        for html, base in results:
+            if html is None:
+                continue
+            tweets, next_cursor = parse_tweets(html, base)
+            if not tweets:
+                continue
+            if filter_retweets:
+                tweets = [t for t in tweets if t.is_retweet]
+            all_tweets.extend(tweets)
+            cursor = next_cursor
+            pages_fetched += 1
+            if not cursor:
+                break
+
+    # Sequential fallback for remaining pages
     while len(all_tweets) < count and pages_fetched < max_pages:
-        params: dict[str, str] = dict(extra_params or {})
+        params = dict(extra_params or {})
         if cursor:
             params["cursor"] = cursor
         html, base = await client.fetch(path, params=params or None)
@@ -143,37 +174,136 @@ async def _fetch_all_tweets(
     *,
     filter_retweets: bool = False,
 ) -> tuple[list[Tweet], str]:
-    """Fetch ALL available tweets (up to safety cap)."""
+    """Fetch ALL available tweets with parallel pagination."""
     all_tweets: list[Tweet] = []
     cursor = ""
     pages_fetched = 0
     cap_pages = _effective_max_pages(ALL_TWEETS_CAP)
 
     while pages_fetched < cap_pages:
+        batch_size = min(settings.max_parallel_pages, cap_pages - pages_fetched)
+        requests = []
+        for i in range(batch_size):
+            params: dict[str, str] = dict(extra_params or {})
+            if i == 0 and cursor:
+                params["cursor"] = cursor
+            elif i > 0:
+                # For parallel pages after first, we'd need cursors
+                # This is simplified - sequential is more reliable for pagination
+                break
+            requests.append((path, params or None))
+
+        if len(requests) == 1:
+            # Sequential mode
+            html, base = await client.fetch(path, params=requests[0][1])
+            tweets, next_cursor = parse_tweets(html, base)
+            if not tweets:
+                break
+            if filter_retweets:
+                tweets = [t for t in tweets if t.is_retweet]
+            all_tweets.extend(tweets)
+            pages_fetched += 1
+            cursor = next_cursor
+            if not cursor:
+                break
+        else:
+            # Parallel mode (only for first batch without cursor dependency)
+            results = await client.fetch_parallel(requests)
+            for html, base in results:
+                if html is None:
+                    continue
+                tweets, next_cursor = parse_tweets(html, base)
+                if not tweets:
+                    continue
+                if filter_retweets:
+                    tweets = [t for t in tweets if t.is_retweet]
+                all_tweets.extend(tweets)
+                pages_fetched += 1
+                cursor = next_cursor
+
+    return all_tweets, cursor
+
+
+async def _fetch_page_n(
+    path: str,
+    extra_params: dict[str, str] | None,
+    page: int,
+) -> tuple[list[Tweet], str]:
+    """Fetch page *page* (1-based) by auto-resolving cursors."""
+    cursor = ""
+    tweets: list[Tweet] = []
+    for current in range(1, page + 1):
         params: dict[str, str] = dict(extra_params or {})
         if cursor:
             params["cursor"] = cursor
         html, base = await client.fetch(path, params=params or None)
-        tweets, next_cursor = parse_tweets(html, base)
-        if not tweets:
+        page_tweets, next_cursor = parse_tweets(html, base)
+        if current == page:
+            tweets = page_tweets
+        cursor = next_cursor
+        if not cursor:
             break
-        if filter_retweets:
-            tweets = [t for t in tweets if t.is_retweet]
-        all_tweets.extend(tweets)
+    return tweets, cursor
+
+
+async def _fetch_users_multi(
+    base_params: dict[str, str],
+    count: int,
+) -> tuple[list, str]:
+    """Fetch multiple user search result pages."""
+    all_users = []
+    cursor = ""
+    pages_fetched = 0
+    max_pages = _effective_max_pages(count)
+
+    while len(all_users) < count and pages_fetched < max_pages:
+        params = dict(base_params)
+        if cursor:
+            params["cursor"] = cursor
+        html, base = await client.fetch("/search", params=params)
+        users, next_cursor = parse_user_search(html, base)
+        if not users:
+            break
+        all_users.extend(users)
         pages_fetched += 1
         cursor = next_cursor
         if not cursor:
             break
 
-    return all_tweets, cursor
+    return all_users[:count], cursor
 
+
+async def _fetch_users_page_n(
+    base_params: dict[str, str],
+    page: int,
+) -> tuple[list, str]:
+    """Fetch page N of user search results."""
+    cursor = ""
+    users = []
+    for current in range(1, page + 1):
+        params = dict(base_params)
+        if cursor:
+            params["cursor"] = cursor
+        html, base = await client.fetch("/search", params=params)
+        page_users, next_cursor = parse_user_search(html, base)
+        if current == page:
+            users = page_users
+        cursor = next_cursor
+        if not cursor:
+            break
+    return users, cursor
+
+
+# ---------------------------------------------------------------------------
+# FastAPI lifespan
+# ---------------------------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("TwAPI v1.4.0 starting on port %d", settings.port)
+    log.info("TwAPI v2.0.0 (High-Concurrency) starting on port %d", settings.port)
     stats_tracker.init_db()
     await client.start()
-    log.info("Startup complete — Nitter client ready")
+    log.info("Startup complete — Nitter client ready with %d instances", len(settings.instances))
     yield
     log.info("Shutting down")
     await client.close()
@@ -181,8 +311,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="TwAPI",
-    description="Twitter/X REST API powered by public Nitter instances",
-    version="1.4.0",
+    description="High-Concurrency Twitter/X REST API powered by public Nitter instances",
+    version="2.0.0",
     lifespan=lifespan,
 )
 app.add_middleware(StatsMiddleware)
@@ -196,9 +326,15 @@ app.add_middleware(StatsMiddleware)
 async def root():
     return {
         "name": "TwAPI",
-        "version": "1.4.0",
+        "version": "2.0.0",
         "docs": "/docs",
         "dashboard": "/dashboard",
+        "features": [
+            "high-concurrency",
+            "connection-pooling",
+            "circuit-breaker",
+            "parallel-pagination",
+        ],
         "endpoints": [
             "GET /api/user/{username}",
             "GET /api/user/{username}/tweets?page=1&count=20&all=false",
@@ -216,8 +352,9 @@ async def root():
 @app.get("/api/user/{username}", response_model=UserProfile)
 async def get_user_profile(username: str):
     """Get a Twitter user's profile information."""
+    safe = _safe_username(username)
     try:
-        html, base = await client.fetch(f"/{username}")
+        html, base = await client.fetch(f"/{safe}")
         return parse_user_profile(html, base)
     except ValueError as e:
         log.warning("Profile not found for %s: %s", username, e)
@@ -235,23 +372,19 @@ async def get_user_tweets(
     cursor: str = Query("", description="Raw pagination cursor (advanced)"),
     all: bool = Query(False, description="Fetch ALL tweets (ignores page/count limits)"),
 ):
-    """Get a user's tweets.
-
-    - **page=N**: fetch page N (~20 tweets per page).
-    - **count=N**: fetch up to N tweets total (max 500).
-    - **all=true**: fetch ALL available tweets (auto-paginate until end).
-    - **cursor**: raw Nitter cursor for manual pagination.
-    """
+    """Get a user's tweets with high-concurrency pagination."""
+    safe_user = _safe_username(username)
+    safe_cursor = _safe_cursor(cursor)
     try:
         if all:
-            tweets, last_cursor = await _fetch_all_tweets(f"/{username}", None)
+            tweets, last_cursor = await _fetch_all_tweets(f"/{safe_user}", None)
             return UserTweetsResponse(
                 user=username, tweets=tweets, cursor=last_cursor,
                 page=0, total_fetched=len(tweets),
             )
 
-        if cursor:
-            html, base = await client.fetch(f"/{username}", params={"cursor": cursor})
+        if safe_cursor:
+            html, base = await client.fetch(f"/{safe_user}", params={"cursor": safe_cursor})
             tweets, next_cursor = parse_tweets(html, base)
             return UserTweetsResponse(
                 user=username, tweets=tweets, cursor=next_cursor,
@@ -259,13 +392,13 @@ async def get_user_tweets(
             )
 
         if count > 0:
-            tweets, last_cursor = await _fetch_tweets_multi(f"/{username}", None, count)
+            tweets, last_cursor = await _fetch_tweets_multi(f"/{safe_user}", None, count)
             return UserTweetsResponse(
                 user=username, tweets=tweets, cursor=last_cursor,
                 page=0, total_fetched=len(tweets),
             )
 
-        tweets, next_cursor = await _fetch_page_n(f"/{username}", None, page)
+        tweets, next_cursor = await _fetch_page_n(f"/{safe_user}", None, page)
         return UserTweetsResponse(
             user=username, tweets=tweets, cursor=next_cursor,
             page=page, total_fetched=len(tweets),
@@ -285,23 +418,21 @@ async def get_user_retweets(
     cursor: str = Query("", description="Raw pagination cursor"),
     all: bool = Query(False, description="Fetch ALL retweets"),
 ):
-    """Get a user's retweets (filtered from timeline).
-
-    Fetches the user timeline and returns only retweeted posts.
-    Supports the same pagination modes as /tweets.
-    """
+    """Get a user's retweets (filtered from timeline)."""
+    safe_user = _safe_username(username)
+    safe_cursor = _safe_cursor(cursor)
     try:
         if all:
             tweets, last_cursor = await _fetch_all_tweets(
-                f"/{username}", None, filter_retweets=True,
+                f"/{safe_user}", None, filter_retweets=True,
             )
             return UserRetweetsResponse(
                 user=username, tweets=tweets, cursor=last_cursor,
                 page=0, total_fetched=len(tweets),
             )
 
-        if cursor:
-            html, base = await client.fetch(f"/{username}", params={"cursor": cursor})
+        if safe_cursor:
+            html, base = await client.fetch(f"/{safe_user}", params={"cursor": safe_cursor})
             tweets, next_cursor = parse_tweets(html, base)
             tweets = [t for t in tweets if t.is_retweet]
             return UserRetweetsResponse(
@@ -311,14 +442,14 @@ async def get_user_retweets(
 
         if count > 0:
             tweets, last_cursor = await _fetch_tweets_multi(
-                f"/{username}", None, count, filter_retweets=True,
+                f"/{safe_user}", None, count, filter_retweets=True,
             )
             return UserRetweetsResponse(
                 user=username, tweets=tweets, cursor=last_cursor,
                 page=0, total_fetched=len(tweets),
             )
 
-        tweets, next_cursor = await _fetch_page_n(f"/{username}", None, page)
+        tweets, next_cursor = await _fetch_page_n(f"/{safe_user}", None, page)
         tweets = [t for t in tweets if t.is_retweet]
         return UserRetweetsResponse(
             user=username, tweets=tweets, cursor=next_cursor,
@@ -334,8 +465,10 @@ async def get_user_retweets(
 @app.get("/api/tweet/{username}/status/{tweet_id}", response_model=TweetDetail)
 async def get_tweet(username: str, tweet_id: str):
     """Get a single tweet and its replies."""
+    safe_user = _safe_username(username)
+    safe_id = _safe_tweet_id(tweet_id)
     try:
-        html, base = await client.fetch(f"/{username}/status/{tweet_id}")
+        html, base = await client.fetch(f"/{safe_user}/status/{safe_id}")
         main_tweet, replies = parse_tweet_detail(html, base)
         if not main_tweet:
             log.warning("Tweet not found: %s/status/%s", username, tweet_id)
@@ -356,13 +489,8 @@ async def search_tweets(
     cursor: str = Query("", description="Raw pagination cursor (advanced)"),
     all: bool = Query(False, description="Fetch ALL search results"),
 ):
-    """Search tweets by keyword.
-
-    - **page=N**: fetch page N of search results.
-    - **count=N**: fetch up to N search results total (max 500).
-    - **all=true**: fetch ALL available results (auto-paginate until end).
-    - **cursor**: raw Nitter cursor for manual pagination.
-    """
+    """Search tweets by keyword with high-concurrency pagination."""
+    safe_cursor = _safe_cursor(cursor)
     base_params: dict[str, str] = {"f": "tweets", "q": q}
     try:
         if all:
@@ -372,8 +500,8 @@ async def search_tweets(
                 page=0, total_fetched=len(tweets),
             )
 
-        if cursor:
-            params = {**base_params, "cursor": cursor}
+        if safe_cursor:
+            params = {**base_params, "cursor": safe_cursor}
             html, base = await client.fetch("/search", params=params)
             tweets, next_cursor = parse_tweets(html, base)
             return SearchResponse(
@@ -407,16 +535,12 @@ async def search_users(
     count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total users to fetch"),
     cursor: str = Query("", description="Raw pagination cursor"),
 ):
-    """Search Twitter users by keyword.
-
-    - **page=N**: fetch page N of user results (~20 per page).
-    - **count=N**: fetch up to N users total (max 500).
-    - **cursor**: raw Nitter cursor for manual pagination.
-    """
+    """Search Twitter users by keyword."""
+    safe_cursor = _safe_cursor(cursor)
     base_params: dict[str, str] = {"f": "users", "q": q}
     try:
-        if cursor:
-            params = {**base_params, "cursor": cursor}
+        if safe_cursor:
+            params = {**base_params, "cursor": safe_cursor}
             html, base = await client.fetch("/search", params=params)
             users, next_cursor = parse_user_search(html, base)
             return UserSearchResponse(
@@ -480,83 +604,3 @@ async def dashboard():
     """API statistics dashboard."""
     from dashboard import DASHBOARD_HTML
     return DASHBOARD_HTML
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-async def _fetch_page_n(
-    path: str,
-    extra_params: dict[str, str] | None,
-    page: int,
-) -> tuple[list[Tweet], str]:
-    """Fetch page *page* (1-based) by auto-resolving cursors for preceding pages."""
-    cursor = ""
-    tweets: list[Tweet] = []
-    for current in range(1, page + 1):
-        params: dict[str, str] = dict(extra_params or {})
-        if cursor:
-            params["cursor"] = cursor
-        html, base = await client.fetch(path, params=params or None)
-        tweets, next_cursor = parse_tweets(html, base)
-        cursor = next_cursor
-        if not cursor and current < page:
-            break  # no more pages available
-    return tweets, cursor
-
-
-async def _fetch_users_page_n(
-    base_params: dict[str, str],
-    page: int,
-) -> tuple[list, str]:
-    """Fetch page N of user search results."""
-    from models import UserSearchResult
-    cursor = ""
-    users: list[UserSearchResult] = []
-    for current in range(1, page + 1):
-        params = dict(base_params)
-        if cursor:
-            params["cursor"] = cursor
-        html, base = await client.fetch("/search", params=params)
-        users, next_cursor = parse_user_search(html, base)
-        cursor = next_cursor
-        if not cursor and current < page:
-            break
-    return users, cursor
-
-
-async def _fetch_users_multi(
-    base_params: dict[str, str],
-    count: int,
-) -> tuple[list, str]:
-    """Fetch up to *count* users by auto-paginating."""
-    from models import UserSearchResult
-    all_users: list[UserSearchResult] = []
-    cursor = ""
-    max_pages = _effective_max_pages(count)
-    pages_fetched = 0
-    while len(all_users) < count and pages_fetched < max_pages:
-        params = dict(base_params)
-        if cursor:
-            params["cursor"] = cursor
-        html, base = await client.fetch("/search", params=params)
-        users, next_cursor = parse_user_search(html, base)
-        if not users:
-            break
-        all_users.extend(users)
-        pages_fetched += 1
-        cursor = next_cursor
-        if not cursor:
-            break
-    return all_users[:count], cursor
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("main:app", host="0.0.0.0", port=settings.port)

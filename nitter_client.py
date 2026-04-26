@@ -1,4 +1,5 @@
-"""Nitter HTTP client with instance rotation, health checks, and anti-bot bypass.
+"""High-concurrency Nitter HTTP client with instance rotation, connection pooling,
+circuit breaker pattern, and anti-bot bypass.
 
 Supports three bypass strategies:
 - Anubis preact: SHA-256 hash of challenge string
@@ -32,16 +33,74 @@ CF_INSTANCES = {
 }
 
 
+class CircuitBreaker:
+    """Simple circuit breaker for instance health."""
+
+    def __init__(self, fail_threshold: int, recovery_time: float):
+        self.fail_threshold = fail_threshold
+        self.recovery_time = recovery_time
+        self.failures = 0
+        self.last_failure = 0.0
+        self._open = False
+        self._lock = asyncio.Lock()
+
+    async def record_success(self) -> None:
+        async with self._lock:
+            self.failures = 0
+            self._open = False
+
+    async def record_failure(self) -> bool:
+        """Returns True if circuit is now open."""
+        async with self._lock:
+            now = time.monotonic()
+            if self._open and now - self.last_failure < self.recovery_time:
+                return True
+            self.failures += 1
+            self.last_failure = now
+            if self.failures >= self.fail_threshold:
+                self._open = True
+                return True
+            return False
+
+    async def can_try(self) -> bool:
+        async with self._lock:
+            if not self._open:
+                return True
+            now = time.monotonic()
+            if now - self.last_failure >= self.recovery_time:
+                self._open = False
+                self.failures = 0
+                return True
+            return False
+
+
 class NitterClient:
-    """Manages multiple Nitter instances with health-aware rotation and
-    automatic Anubis / Cloudflare challenge solving."""
+    """High-concurrency Nitter client with:
+    - Per-instance connection pools
+    - Semaphore-based concurrency limiting
+    - Circuit breaker pattern
+    - Parallel instance fetching (race mode)
+    """
 
     def __init__(self) -> None:
         self._instances = list(settings.instances)
         self._health: dict[str, float] = {u: 0.0 for u in self._instances}
+        self._circuit_breakers: dict[str, CircuitBreaker] = {
+            u: CircuitBreaker(settings.circuit_breaker_failures, settings.circuit_breaker_recovery)
+            for u in self._instances
+        }
         self._lock = asyncio.Lock()
         self._cookies: dict[str, dict[str, str]] = {u: {} for u in self._instances}
-        self._cf_browser = None  # lazy import to avoid startup cost
+        self._cf_browser = None  # lazy import
+
+        # Global concurrency limit across all instances
+        self._global_sem = asyncio.Semaphore(settings.max_concurrent_requests)
+        # Per-instance concurrency limits
+        self._instance_sems: dict[str, asyncio.Semaphore] = {
+            u: asyncio.Semaphore(settings.instance_concurrent_limit) for u in self._instances
+        }
+        # Per-instance connection pools (persistent sessions)
+        self._sessions: dict[str, AsyncSession | None] = {u: None for u in self._instances}
 
     # ---- lifecycle ----------------------------------------------------------
 
@@ -51,14 +110,24 @@ class NitterClient:
                 asyncio.get_event_loop().run_in_executor(None, self._init_cf_browser)
             except Exception:
                 pass
+        # Pre-warm connection pools
+        await asyncio.gather(*(self._warm_pool(u) for u in self._instances), return_exceptions=True)
         asyncio.create_task(self._health_loop())
+
+    async def _warm_pool(self, instance: str) -> None:
+        """Initialize persistent session for an instance."""
+        try:
+            session = self._make_session(instance)
+            self._sessions[instance] = session
+            log.debug("Connection pool warmed for %s", instance)
+        except Exception as exc:
+            log.warning("Failed to warm pool for %s: %s", instance, exc)
 
     def _init_cf_browser(self) -> None:
         try:
             from cf_browser import browser
             browser.start()
             self._cf_browser = browser
-            # Mark CF instances as tentatively available (latency unknown)
             for url in self._instances:
                 if self._is_cf_instance(url):
                     self._health[url] = 5000.0
@@ -68,6 +137,12 @@ class NitterClient:
             self._cf_browser = None
 
     async def close(self) -> None:
+        for session in self._sessions.values():
+            if session:
+                try:
+                    await session.close()
+                except Exception:
+                    pass
         if self._cf_browser:
             try:
                 self._cf_browser.stop()
@@ -75,10 +150,23 @@ class NitterClient:
                 pass
 
     def _make_session(self, instance: str) -> AsyncSession:
-        s = AsyncSession(impersonate="chrome124")
+        s = AsyncSession(
+            impersonate="chrome124",
+            timeout=settings.fetch_timeout,
+            # Connection pooling settings
+            http2=True,
+        )
         for name, val in self._cookies.get(instance, {}).items():
             s.cookies.set(name, val)
         return s
+
+    def _get_session(self, instance: str) -> AsyncSession:
+        """Get or create persistent session for instance."""
+        session = self._sessions.get(instance)
+        if session is None:
+            session = self._make_session(instance)
+            self._sessions[instance] = session
+        return session
 
     def _save_cookies(self, instance: str, session: AsyncSession) -> None:
         stored = self._cookies.setdefault(instance, {})
@@ -87,19 +175,38 @@ class NitterClient:
 
     # ---- instance selection -------------------------------------------------
 
-    def _pick_instance(self) -> str:
-        healthy = [u for u, lat in self._health.items() if lat >= 0]
+    def _pick_instance(self, exclude: set[str] | None = None) -> str | None:
+        """Pick a healthy instance, weighted by latency."""
+        exclude = exclude or set()
+        healthy = [
+            u for u, lat in self._health.items()
+            if lat >= 0 and u not in exclude
+        ]
         if not healthy:
-            healthy = list(self._instances)
+            # Fallback: try any instance not in exclude
+            candidates = [u for u in self._instances if u not in exclude]
+            if not candidates:
+                return None
+            return random.choice(candidates)
         weights = [1.0 / max(self._health.get(u, 1), 1) for u in healthy]
         return random.choices(healthy, weights=weights, k=1)[0]
+
+    async def _get_healthy_instances(self, count: int = 3) -> list[str]:
+        """Get multiple healthy instances for parallel fetching."""
+        healthy = [
+            u for u, lat in self._health.items()
+            if lat >= 0 and await self._circuit_breakers[u].can_try()
+        ]
+        if not healthy:
+            healthy = list(self._instances)
+        # Sort by latency, take top N
+        healthy.sort(key=lambda u: self._health.get(u, float('inf')))
+        return healthy[:count]
 
     # ---- Anubis challenge solvers -------------------------------------------
 
     @staticmethod
     def _solve_anubis_preact(html: str) -> tuple[str, str] | None:
-        """Extract preact-style Anubis challenge and compute the answer.
-        Returns (pass_url_suffix, _) or None."""
         m = re.search(r'id="preact_info"[^>]*>\s*(\{.*?\})\s*<', html)
         if not m:
             return None
@@ -116,8 +223,6 @@ class NitterClient:
 
     @staticmethod
     def _solve_anubis_fast(html: str, path: str) -> tuple[str, dict[str, str]] | None:
-        """Extract fast-style Anubis PoW challenge and brute-force nonce.
-        Returns (pass_url_path, params_dict) or None."""
         m = re.search(r'id="anubis_challenge"[^>]*>(\{.*?\})\s*<', html, re.DOTALL)
         if not m:
             return None
@@ -155,7 +260,6 @@ class NitterClient:
         return None
 
     async def _try_solve_anubis(self, session: AsyncSession, base: str, path: str, html: str) -> bool:
-        """Attempt to solve an Anubis challenge. Returns True on success."""
         preact = self._solve_anubis_preact(html)
         if preact:
             url_path, _ = preact
@@ -183,7 +287,6 @@ class NitterClient:
     # ---- Cloudflare browser fetch -------------------------------------------
 
     async def _fetch_via_browser(self, base: str, path: str, params: dict[str, Any] | None) -> str | None:
-        """Fetch a page through the Cloudflare browser backend."""
         if not self._cf_browser or not self._cf_browser.is_available():
             return None
         url = base.rstrip("/") + "/" + path.lstrip("/")
@@ -206,126 +309,173 @@ class NitterClient:
 
     # ---- core fetch ---------------------------------------------------------
 
-    async def fetch(self, path: str, params: dict[str, Any] | None = None) -> tuple[str, str]:
-        """Fetch *path* from a healthy instance. Returns (html, base_url).
+    async def _fetch_single(
+        self,
+        base: str,
+        path: str,
+        params: dict[str, Any] | None,
+    ) -> tuple[str, str] | None:
+        """Fetch from a single instance. Returns (html, base) or None on failure."""
+        # Check circuit breaker
+        if not await self._circuit_breakers[base].can_try():
+            return None
 
-        Routes Cloudflare instances through the browser backend; all others
-        use curl_cffi with Anubis challenge solving.
-        """
-        last_exc: Exception | None = None
-        tried: set[str] = set()
-
-        for attempt in range(settings.max_retries):
-            base = self._pick_instance()
-            if base in tried:
-                candidates = [u for u, lat in self._health.items() if lat >= 0 and u not in tried]
-                if candidates:
-                    base = random.choice(candidates)
-            tried.add(base)
-            log.debug("Fetch attempt %d: %s%s", attempt + 1, base, path)
-
-            # --- Cloudflare instance: use browser ---
+        async with self._instance_sems[base]:  # Per-instance limit
+            # Cloudflare instance: use browser
             if self._is_cf_instance(base):
                 try:
                     html = await self._fetch_via_browser(base, path, params)
                     if html and not _is_antibot_page(html) and not _is_cf_page(html):
+                        await self._circuit_breakers[base].record_success()
                         return html, base
-                    async with self._lock:
-                        self._health[base] = -1
-                    last_exc = RuntimeError(f"{base} CF browser fetch failed")
-                    log.warning("CF browser fetch failed for %s%s", base, path)
+                    await self._circuit_breakers[base].record_failure()
+                    return None
                 except Exception as exc:
-                    last_exc = exc
                     log.error("CF browser exception for %s: %s", base, exc)
-                    async with self._lock:
-                        self._health[base] = -1
-                continue
+                    await self._circuit_breakers[base].record_failure()
+                    return None
 
-            # --- Normal / Anubis instance: use curl_cffi ---
+            # Normal instance: use persistent session
             url = base.rstrip("/") + "/" + path.lstrip("/")
             try:
-                async with self._make_session(base) as session:
-                    resp = await session.get(url, params=params, timeout=settings.request_timeout)
-                    html = resp.text
+                session = self._get_session(base)
+                resp = await session.get(url, params=params, timeout=settings.request_timeout)
+                html = resp.text
 
-                    if _is_anubis_page(html):
-                        solved = await self._try_solve_anubis(session, base, "/" + path.lstrip("/"), html)
-                        if solved:
-                            resp = await session.get(url, params=params, timeout=settings.request_timeout)
-                            html = resp.text
-                            self._save_cookies(base, session)
-                            if not _is_antibot_page(html) and not _is_anubis_page(html):
-                                return html, base
-                        async with self._lock:
-                            self._health[base] = -1
-                        last_exc = RuntimeError(f"{base} Anubis challenge failed")
-                        log.warning("Anubis challenge failed for %s", base)
-                        continue
+                if _is_anubis_page(html):
+                    solved = await self._try_solve_anubis(session, base, "/" + path.lstrip("/"), html)
+                    if solved:
+                        resp = await session.get(url, params=params, timeout=settings.request_timeout)
+                        html = resp.text
+                        self._save_cookies(base, session)
+                        if not _is_antibot_page(html) and not _is_anubis_page(html):
+                            await self._circuit_breakers[base].record_success()
+                            return html, base
+                    await self._circuit_breakers[base].record_failure()
+                    return None
 
-                    if _is_antibot_page(html):
-                        async with self._lock:
-                            self._health[base] = -1
-                        last_exc = RuntimeError(f"{base} returned anti-bot page")
-                        log.warning("Anti-bot page from %s", base)
-                        continue
+                if _is_antibot_page(html):
+                    await self._circuit_breakers[base].record_failure()
+                    return None
 
-                    if resp.status_code >= 500:
-                        async with self._lock:
-                            self._health[base] = -1
-                        last_exc = RuntimeError(f"{base} returned HTTP {resp.status_code}")
-                        log.warning("HTTP %d from %s%s", resp.status_code, base, path)
-                        continue
+                if resp.status_code >= 500:
+                    await self._circuit_breakers[base].record_failure()
+                    return None
 
-                    self._save_cookies(base, session)
-                    return html, base
+                self._save_cookies(base, session)
+                await self._circuit_breakers[base].record_success()
+                return html, base
 
             except Exception as exc:
-                last_exc = exc
                 log.error("Request exception for %s%s: %s", base, path, exc)
-                async with self._lock:
-                    self._health[base] = -1
+                await self._circuit_breakers[base].record_failure()
+                return None
 
-        log.error("All Nitter instances failed for %s (tried %s)", path, tried)
-        raise last_exc or RuntimeError("All Nitter instances failed")
+    async def fetch(self, path: str, params: dict[str, Any] | None = None) -> tuple[str, str]:
+        """High-concurrency fetch with parallel instance racing.
+        
+        Fetches from multiple healthy instances concurrently and returns
+        the first successful response.
+        """
+        async with self._global_sem:
+            # Get top healthy instances for parallel fetch
+            instances = await self._get_healthy_instances(count=3)
+            if not instances:
+                instances = list(self._instances)
+
+            # Race: fetch from multiple instances concurrently
+            tasks = [
+                asyncio.create_task(self._fetch_single(inst, path, params))
+                for inst in instances
+            ]
+
+            # Wait for first successful result
+            pending = set(tasks)
+            last_error = None
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                for task in done:
+                    try:
+                        result = task.result()
+                        if result is not None:
+                            # Cancel remaining tasks
+                            for t in pending:
+                                t.cancel()
+                            return result
+                    except Exception as exc:
+                        last_error = exc
+
+            # All failed
+            log.error("All Nitter instances failed for %s (tried %s)", path, instances)
+            raise last_error or RuntimeError("All Nitter instances failed")
+
+    # ---- parallel batch fetch ------------------------------------------------
+
+    async def fetch_parallel(
+        self,
+        requests: list[tuple[str, dict[str, Any] | None]],
+    ) -> list[tuple[str, str] | None]:
+        """Fetch multiple pages in parallel. 
+        
+        requests: list of (path, params) tuples
+        Returns: list of (html, base) or None results
+        """
+        async with self._global_sem:
+            # Distribute requests across instances
+            instances = await self._get_healthy_instances(count=min(len(requests), 5))
+            if not instances:
+                instances = list(self._instances)
+
+            tasks = []
+            for i, (path, params) in enumerate(requests):
+                inst = instances[i % len(instances)]
+                task = asyncio.create_task(self._fetch_single(inst, path, params))
+                tasks.append(task)
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return [
+                r if not isinstance(r, Exception) else None
+                for r in results
+            ]
 
     # ---- health check -------------------------------------------------------
 
     async def _check_one(self, url: str) -> None:
-        """Health-check a non-CF instance via curl_cffi."""
         if self._is_cf_instance(url):
-            return  # CF instances checked separately
+            return
+        if not await self._circuit_breakers[url].can_try():
+            return
         try:
-            async with self._make_session(url) as session:
-                t0 = time.monotonic()
-                resp = await session.get(url.rstrip("/") + "/elonmusk", timeout=8.0)
-                html = resp.text
+            session = self._get_session(url)
+            t0 = time.monotonic()
+            resp = await session.get(url.rstrip("/") + "/elonmusk", timeout=8.0)
+            html = resp.text
 
-                if _is_anubis_page(html):
-                    solved = await self._try_solve_anubis(session, url, "/elonmusk", html)
-                    if solved:
-                        resp = await session.get(url.rstrip("/") + "/elonmusk", timeout=8.0)
-                        html = resp.text
-                        self._save_cookies(url, session)
+            if _is_anubis_page(html):
+                solved = await self._try_solve_anubis(session, url, "/elonmusk", html)
+                if solved:
+                    resp = await session.get(url.rstrip("/") + "/elonmusk", timeout=8.0)
+                    html = resp.text
+                    self._save_cookies(url, session)
 
-                latency = (time.monotonic() - t0) * 1000
-                if resp.status_code < 400 and not _is_antibot_page(html) and not _is_anubis_page(html):
-                    async with self._lock:
-                        self._health[url] = latency
-                else:
-                    async with self._lock:
-                        self._health[url] = -1
-                    log.debug("Health check failed for %s: status=%d antibot=%s", url, resp.status_code, _is_antibot_page(html))
+            latency = (time.monotonic() - t0) * 1000
+            if resp.status_code < 400 and not _is_antibot_page(html) and not _is_anubis_page(html):
+                async with self._lock:
+                    self._health[url] = latency
+                await self._circuit_breakers[url].record_success()
+            else:
+                async with self._lock:
+                    self._health[url] = -1
+                await self._circuit_breakers[url].record_failure()
         except Exception as exc:
             log.debug("Health check exception for %s: %s", url, exc)
             async with self._lock:
                 self._health[url] = -1
-
-    async def _check_cf_instances(self) -> None:
-        """No-op: CF instances are validated on-demand during fetch."""
-        pass
+            await self._circuit_breakers[url].record_failure()
 
     async def check_health(self) -> dict[str, float]:
-        """Check non-CF instances. CF instances keep their last-known status."""
         await asyncio.gather(*(self._check_one(u) for u in self._instances))
         return dict(self._health)
 
@@ -352,19 +502,16 @@ _ANTIBOT_MARKERS = [
 
 
 def _is_anubis_page(html: str) -> bool:
-    """Return True if the page is an Anubis bot-check page."""
     lower = html[:5000].lower()
     return ("making sure you" in lower and "not a bot" in lower) or "anubis_challenge" in html[:5000]
 
 
 def _is_cf_page(html: str) -> bool:
-    """Return True if the page is a Cloudflare challenge page."""
     lower = html[:3000].lower()
     return "just a moment" in lower and ("challenge-platform" in lower or "_cf_chl" in html[:5000])
 
 
 def _is_antibot_page(html: str) -> bool:
-    """Return True if the page is a non-Anubis bot-check / captcha page."""
     if _is_anubis_page(html):
         return False
     lower = html[:3000].lower()
