@@ -59,6 +59,10 @@ class CloudflareBrowser:
             self._thread.join(timeout=15)
         if self._xvfb:
             self._xvfb.terminate()
+            try:
+                self._xvfb.wait(timeout=5)
+            except Exception:
+                pass
             self._xvfb = None
         self._started = False
 

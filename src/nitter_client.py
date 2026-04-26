@@ -190,7 +190,11 @@ class NitterClient:
         session = self._sessions.pop(instance, None)
         if session:
             try:
-                asyncio.get_event_loop().create_task(session.close())
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(session.close())
+                else:
+                    loop.run_until_complete(session.close())
             except Exception:
                 pass
 
@@ -341,7 +345,12 @@ class NitterClient:
             return None
 
     def _is_cf_instance(self, base: str) -> bool:
-        return base in CF_INSTANCES
+        # Runtime detection: check if instance recently returned CF challenge
+        if base in CF_INSTANCES:
+            return True
+        # Dynamic detection: if health check shows CF page, mark as CF
+        # (health check already detects this via _is_cf_page)
+        return False
 
     # ---- core fetch ---------------------------------------------------------
 
