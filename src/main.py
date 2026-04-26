@@ -32,7 +32,7 @@ from stats import stats_tracker, StatsMiddleware
 # ---------------------------------------------------------------------------
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True, mode=0o750)
 
 def _setup_logging() -> None:
     """Configure 'twapi' logger with console + rotating file handlers."""
