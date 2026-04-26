@@ -21,7 +21,7 @@ from urllib.parse import urlencode
 
 from curl_cffi.requests import AsyncSession
 
-from config import settings
+from src.config import settings
 
 log = logging.getLogger("twapi.nitter_client")
 

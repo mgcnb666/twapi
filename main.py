@@ -11,8 +11,8 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
-from config import settings
-from models import (
+from src.config import settings
+from src.models import (
     HealthResponse,
     InstanceHealth,
     SearchResponse,
@@ -23,9 +23,9 @@ from models import (
     UserSearchResponse,
     UserTweetsResponse,
 )
-from nitter_client import client
-from parser import parse_tweet_detail, parse_tweets, parse_user_profile, parse_user_search
-from stats import stats_tracker, StatsMiddleware
+from src.nitter_client import client
+from src.parser import parse_tweet_detail, parse_tweets, parse_user_profile, parse_user_search
+from src.stats import stats_tracker, StatsMiddleware
 
 # ---------------------------------------------------------------------------
 # Logging setup

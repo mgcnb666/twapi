@@ -17,6 +17,7 @@ Fetches live data from Nitter (no caching) so results are always up-to-date.
 
 ```bash
 pip install -r requirements.txt
+cd src
 uvicorn main:app --host 0.0.0.0 --port 30192 --workers 4
 ```
 
@@ -157,17 +158,23 @@ python benchmark.py --endpoint mixed --concurrent 80 --requests 400
 
 ```
 twapi/
-├── main.py              # FastAPI application
-├── nitter_client.py     # Nitter client with pooling & circuit breaker
-├── config.py            # Settings
-├── models.py            # Pydantic models
-├── parser.py            # HTML parser
-├── stats.py             # API statistics
-├── dashboard.py         # Stats dashboard HTML
-├── twapi_client.py      # Simple async client
-├── batch_client.py      # Batch query client
-├── benchmark.py         # Performance testing
-└── README.md            # This file
+├── src/                        # Core source code
+│   ├── __init__.py
+│   ├── main.py                 # FastAPI application
+│   ├── nitter_client.py        # Nitter client with pooling & circuit breaker
+│   ├── config.py               # Settings
+│   ├── models.py               # Pydantic models
+│   ├── parser.py               # HTML parser
+│   ├── stats.py                # API statistics
+│   ├── dashboard.py            # Stats dashboard HTML
+│   └── cf_browser.py           # Cloudflare browser
+├── twapi_client.py             # Simple async client
+├── batch_client.py             # Batch query client
+├── benchmark.py                # Performance testing
+├── README.md                   # This file
+├── README_CN.md                # Chinese README
+├── SKILL.md                    # AI Skill documentation
+└── requirements.txt            # Dependencies
 ```
 
 ## Changelog
