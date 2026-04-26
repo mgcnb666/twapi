@@ -1,133 +1,195 @@
-# TwAPI High-Concurrency Edition v2.0
+# TwAPI v2.0
 
-基于 [mgcnb666/twapi](https://github.com/mgcnb666/twapi) 改进的高并发版本。
+Twitter/X REST API powered by public Nitter instances.
 
-## 主要改进
+Fetches live data from Nitter (no caching) so results are always up-to-date.
 
-### 1. 连接池管理
-- **持久化连接**: 每个 Nitter 实例维护独立的 `AsyncSession`，避免重复创建连接
-- **HTTP/2 支持**: 启用多路复用，减少连接数
-- **预连接**: 启动时预热所有连接池
+## Features
 
-### 2. 并发控制
-- **全局信号量**: `max_concurrent_requests` (默认 1000) 控制总并发
-- **实例级信号量**: `instance_concurrent_limit` (默认 50) 防止单实例过载
-- **并行实例竞争**: 同时向多个健康实例发起请求，返回最快响应
+- **Connection Pooling**: Persistent `AsyncSession` per Nitter instance
+- **Concurrency Control**: Global + per-instance semaphore limiting
+- **Circuit Breaker**: Automatic instance health management
+- **Parallel Pagination**: Fetch multiple pages concurrently
+- **Instance Racing**: Query 3 healthy instances simultaneously, return fastest
+- **Auto-Rotation**: Seamless failover between Nitter instances
 
-### 3. 熔断器模式 (Circuit Breaker)
-- 连续失败 5 次后标记实例为不健康
-- 30 秒后自动恢复尝试
-- 避免向已死实例发送请求
-
-### 4. 并行分页
-- `enable_parallel_pagination`: 同时获取多页数据
-- `max_parallel_pages`: 控制并行页数 (默认 5)
-- 大幅减少大批量数据获取时间
-
-### 5. 健康检查优化
-- 异步并行检查所有实例
-- 基于延迟的加权选择
-- 实时健康状态更新
-
-## 配置参数 (config.py)
-
-```python
-max_concurrent_requests: int = 1000      # 全局并发限制
-instance_concurrent_limit: int = 50      # 单实例并发限制
-connection_pool_size: int = 100         # 连接池大小
-fetch_timeout: float = 10.0             # 单次请求超时
-circuit_breaker_failures: int = 5         # 熔断触发失败次数
-circuit_breaker_recovery: float = 30.0  # 熔断恢复时间(秒)
-enable_parallel_pagination: bool = True   # 启用并行分页
-max_parallel_pages: int = 5             # 最大并行页数
-bulk_search_workers: int = 20           # 批量搜索工作线程
-```
-
-## 启动服务
+## Quick Start
 
 ```bash
-cd /root/twapi
 pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 30192 --workers 4
 ```
 
-## 性能测试
+## API Endpoints
+
+| Endpoint | Description | Parameters |
+|----------|-------------|------------|
+| `GET /api/user/{username}` | User profile | - |
+| `GET /api/user/{username}/tweets` | User tweets | `page`, `count`, `cursor`, `all` |
+| `GET /api/user/{username}/retweets` | User retweets | `page`, `count`, `cursor`, `all` |
+| `GET /api/tweet/{username}/status/{id}` | Single tweet + replies | - |
+| `GET /api/search?q=keyword` | Search tweets | `q`, `page`, `count`, `cursor`, `all` |
+| `GET /api/search/users?q=keyword` | Search users | `q`, `page`, `count` |
+| `GET /api/health` | Instance health | - |
+| `GET /api/stats` | API statistics | `hours` |
+| `GET /dashboard` | Stats dashboard | - |
+
+### Examples
 
 ```bash
-# 搜索接口压力测试
-python benchmark.py --endpoint search --query "python" --concurrent 100 --requests 500
+# User profile
+curl http://localhost:30192/api/user/elonmusk
 
-# 用户接口压力测试
-python benchmark.py --endpoint user --username "elonmusk" --concurrent 50 --requests 200
+# Search tweets
+curl "http://localhost:30192/api/search?q=python&count=50"
 
-# 推文批量获取测试
-python benchmark.py --endpoint tweets --username "elonmusk" --count 100 --concurrent 30 --requests 150
+# Get tweets (with auto-pagination)
+curl "http://localhost:30192/api/user/github/tweets?count=100"
 
-# 混合负载测试
-python benchmark.py --endpoint mixed --concurrent 80 --requests 400
+# Get ALL tweets
+curl "http://localhost:30192/api/user/elonmusk/tweets?all=true"
 ```
 
-## 批量查询客户端
+## Python Client
 
 ```python
 import asyncio
-from batch_client import BatchTwAPIClient
+from twapi_client import TwAPIClient
 
 async def main():
-    client = BatchTwAPIClient("http://localhost:30192")
+    client = TwAPIClient("http://localhost:30192")
     
-    # 批量获取用户信息 (10并发)
-    users = ["elonmusk", "github", "twitter", "google", "microsoft"]
-    results = await client.batch_get_users(users, concurrent=10)
-    for r in results:
-        print(f"Success: {r.success}, Latency: {r.latency_ms:.0f}ms")
+    # Get user profile
+    user = await client.get_user("elonmusk")
+    print(user["display_name"], user["followers_count"])
     
-    # 批量搜索 (20工作线程)
-    queries = ["python", "ai", "ml", "data", "cloud"]
-    results = await client.bulk_search(queries, count=20, workers=20)
+    # Search tweets
+    results = await client.search_tweets("python programming", count=50)
+    for tweet in results["tweets"]:
+        print(tweet["author"], tweet["text"][:100])
+    
+    # Get user's recent tweets
+    tweets = await client.get_tweets("github", count=40)
     
     await client.close()
 
 asyncio.run(main())
 ```
 
-## API 端点
+## Batch Queries
 
-| 端点 | 说明 |
-|------|------|
-| `GET /api/user/{username}` | 用户资料 |
-| `GET /api/user/{username}/tweets` | 用户推文 |
-| `GET /api/user/{username}/retweets` | 用户转推 |
-| `GET /api/tweet/{username}/status/{id}` | 单条推文 |
-| `GET /api/search?q=keyword` | 搜索推文 |
-| `GET /api/search/users?q=keyword` | 搜索用户 |
-| `GET /api/health` | 实例健康检查 |
-| `GET /api/stats` | API 统计信息 |
-| `GET /dashboard` | 统计面板 |
+```python
+from batch_client import BatchTwAPIClient
 
-## 性能对比
+async def main():
+    client = BatchTwAPIClient("http://localhost:30192")
+    
+    # Batch user lookup (10 concurrent)
+    users = ["elonmusk", "github", "twitter", "google"]
+    results = await client.batch_get_users(users, concurrent=10)
+    
+    # Bulk search (20 workers)
+    queries = ["python", "ai", "ml", "data"]
+    results = await client.bulk_search(queries, count=20, workers=20)
+    
+    await client.close()
+```
 
-| 指标 | 原版 | 高并发版 | 提升 |
-|------|------|----------|------|
-| 单实例并发 | 1 | 50 | 50x |
-| 全局并发 | 无限制 | 1000 | 可控 |
-| 实例选择 | 单实例 | 3实例竞争 | 3x |
-| 连接复用 | 否 | 是 | 显著 |
-| 分页获取 | 顺序 | 并行 | 5x |
-| 熔断保护 | 无 | 有 | 更稳定 |
+## Configuration
 
-## 文件结构
+Edit `config.py`:
+
+```python
+max_concurrent_requests: int = 1000   # Global limit
+instance_concurrent_limit: int = 50    # Per-instance limit
+fetch_timeout: float = 10.0            # Request timeout
+circuit_breaker_failures: int = 5       # Failures before marking unhealthy
+circuit_breaker_recovery: float = 30.0 # Recovery time (seconds)
+enable_parallel_pagination: bool = True  # Parallel page fetching
+max_parallel_pages: int = 5            # Max parallel pages
+```
+
+## Benchmark
+
+```bash
+# Search endpoint
+python benchmark.py --endpoint search --query "python" --concurrent 100 --requests 500
+
+# Mixed workload
+python benchmark.py --endpoint mixed --concurrent 80 --requests 400
+```
+
+## Response Models
+
+### UserProfile
+```json
+{
+  "username": "elonmusk",
+  "display_name": "Elon Musk",
+  "avatar_url": "...",
+  "bio": "...",
+  "tweets_count": "...",
+  "following_count": "...",
+  "followers_count": "...",
+  "likes_count": "..."
+}
+```
+
+### Tweet
+```json
+{
+  "id": "123456789",
+  "author": "elonmusk",
+  "display_name": "Elon Musk",
+  "text": "...",
+  "date": "...",
+  "retweets": "...",
+  "likes": "...",
+  "replies": "...",
+  "images": [],
+  "videos": [],
+  "is_retweet": false,
+  "link": "..."
+}
+```
+
+## File Structure
 
 ```
 twapi/
-├── main.py              # FastAPI 主应用 (高并发版)
-├── nitter_client.py     # Nitter 客户端 (连接池+熔断器)
-├── config.py            # 配置 (新增并发参数)
-├── models.py            # Pydantic 模型 (未修改)
-├── parser.py            # HTML 解析 (未修改)
-├── stats.py             # 统计中间件 (未修改)
-├── dashboard.py         # 统计面板 (未修改)
-├── benchmark.py         # 性能测试工具
-├── batch_client.py      # 批量查询客户端
-└── README.md            # 本文件
+├── main.py              # FastAPI application
+├── nitter_client.py     # Nitter client with pooling & circuit breaker
+├── config.py            # Settings
+├── models.py            # Pydantic models
+├── parser.py            # HTML parser
+├── stats.py             # API statistics
+├── dashboard.py         # Stats dashboard HTML
+├── twapi_client.py      # Simple async client
+├── batch_client.py      # Batch query client
+├── benchmark.py         # Performance testing
+└── README.md            # This file
 ```
+
+## Changelog
+
+### v2.0.0
+- Added connection pooling with persistent sessions
+- Added circuit breaker pattern for instance health
+- Added global and per-instance concurrency limiting
+- Added parallel instance fetching (race mode)
+- Added parallel pagination support
+- Added batch query client (`batch_client.py`)
+- Added benchmark tool (`benchmark.py`)
+- Added simple async client (`twapi_client.py`)
+
+### v1.4.0
+- Structured logging
+- Search users API
+
+### v1.3.0
+- API stats dashboard
+- Removed likes endpoint
+
+## License
+
+MIT
