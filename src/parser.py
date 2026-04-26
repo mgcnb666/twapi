@@ -214,6 +214,15 @@ def parse_tweet_detail(html: str, base_url: str) -> tuple[Tweet | None, list[Twe
     main_el = soup.select_one(".main-tweet .tweet-body")
     if main_el:
         main_tweet = parse_tweet_item(main_el, base_url)
+        # Single-tweet pages may not have .tweet-link; derive id/link from URL
+        if main_tweet and not main_tweet.id:
+            tweet_id_match = re.search(r"/status/(\d+)", base_url)
+            if tweet_id_match:
+                tweet_id = tweet_id_match.group(1)
+                main_tweet = main_tweet.model_copy(update={
+                    "id": tweet_id,
+                    "link": f"{base_url.split('/status/')[0]}/status/{tweet_id}",
+                })
 
     replies: list[Tweet] = []
     for item in soup.select(".reply .tweet-body"):

@@ -14,3 +14,6 @@ build/
 src/api_stats.db
 src/logs/
 src/__pycache__/
+*.db-shm
+*.db-wal
+twapi.log
