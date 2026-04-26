@@ -561,6 +561,12 @@ async def get_tweet(username: str, tweet_id: str):
         if not main_tweet:
             log.warning("Tweet not found: %s/status/%s", username, tweet_id)
             raise HTTPException(status_code=404, detail="Tweet not found")
+        # Single-tweet pages may lack .tweet-link; ensure id/link are populated
+        if main_tweet and not main_tweet.id:
+            main_tweet = main_tweet.model_copy(update={
+                "id": safe_id,
+                "link": f"{base}/{safe_user}/status/{safe_id}",
+            })
         return TweetDetail(tweet=main_tweet, replies=replies)
     except HTTPException:
         raise
