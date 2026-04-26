@@ -8,8 +8,10 @@ import re
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
+from starlette.responses import Response
 
 from config import settings
 from models import (
@@ -344,6 +346,34 @@ async def lifespan(app: FastAPI):
     await client.close()
 
 
+class SecurityHeadersMiddleware:
+    """Add security headers to all responses."""
+    
+    def __init__(self, app):
+        self.app = app
+    
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        
+        async def wrapped_send(message):
+            if message["type"] == "http.response.start":
+                headers = message.get("headers", [])
+                security_headers = [
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"x-frame-options", b"DENY"),
+                    (b"x-xss-protection", b"1; mode=block"),
+                    (b"referrer-policy", b"strict-origin-when-cross-origin"),
+                    (b"permissions-policy", b"accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"),
+                ]
+                headers.extend(security_headers)
+                message["headers"] = headers
+            await send(message)
+        
+        await self.app(scope, receive, wrapped_send)
+
+
 app = FastAPI(
     title="TwAPI",
     description="High-Concurrency Twitter/X REST API powered by public Nitter instances",
@@ -351,6 +381,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.add_middleware(StatsMiddleware)
+
+
+
+# ---------------------------------------------------------------------------
+# Dashboard authentication
+# ---------------------------------------------------------------------------
+dashboard_auth = HTTPBasic(auto_error=False)
+_DASHBOARD_USER = os.getenv("TWAPI_DASHBOARD_USER", "admin")
+_DASHBOARD_PASS = os.getenv("TWAPI_DASHBOARD_PASS", "admin")
+
+async def _require_dashboard_auth(credentials: HTTPBasicCredentials | None = Depends(dashboard_auth)):
+    """Verify dashboard credentials."""
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if credentials.username != _DASHBOARD_USER or credentials.password != _DASHBOARD_PASS:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return credentials
 
 
 # ---------------------------------------------------------------------------
@@ -642,7 +689,7 @@ async def get_recent_calls(
 
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
-async def dashboard():
+async def dashboard(credentials: HTTPBasicCredentials = Depends(_require_dashboard_auth)):
     """API statistics dashboard."""
     from dashboard import DASHBOARD_HTML
     return DASHBOARD_HTML

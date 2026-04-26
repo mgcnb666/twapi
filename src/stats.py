@@ -173,6 +173,19 @@ class StatsTracker:
         return [dict(r) for r in rows]
 
 
+    def cleanup_old_records(self, hours: int = 168) -> int:
+        """Delete records older than specified hours. Returns deleted count."""
+        conn = self._conn()
+        cursor = conn.execute(
+            "DELETE FROM api_calls WHERE timestamp < datetime('now', ?)",
+            (f"-{hours} hours",),
+        )
+        conn.commit()
+        # Run VACUUM to reclaim space
+        conn.execute("VACUUM")
+        return cursor.rowcount
+
+
 def _classify_endpoint(path: str) -> str:
     """Map a request path to a human-readable endpoint name."""
     if path == "/" or path == "":
