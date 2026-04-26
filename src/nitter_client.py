@@ -479,6 +479,10 @@ class NitterClient:
             if not instances:
                 instances = list(self._instances)
 
+            if not instances:
+                log.error("No Nitter instances available for parallel fetch")
+                return [None] * len(requests)
+
             tasks = []
             for i, (path, params) in enumerate(requests):
                 inst = instances[i % len(instances)]
