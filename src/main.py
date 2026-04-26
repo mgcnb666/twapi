@@ -120,7 +120,7 @@ def _validate_username(value: str) -> str:
     if not _TWITTER_USERNAME_RE.match(cleaned):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid username format: '{value}'. Must be 1-15 alphanumeric chars or underscores.",
+            detail="Invalid username format. Must be 1-15 alphanumeric chars or underscores.",
         )
     return cleaned
 
@@ -130,7 +130,7 @@ def _validate_tweet_id(value: str) -> str:
     if not _TWITTER_TWEET_ID_RE.match(value):
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid tweet ID format: '{value}'. Must be 10-20 digits.",
+            detail="Invalid tweet ID format. Must be 10-20 digits.",
         )
     return value
 
@@ -392,9 +392,9 @@ async def get_user_profile(username: str):
     try:
         html, base = await client.fetch(f"/{safe}")
         return parse_user_profile(html, base)
-    except ValueError as e:
-        log.warning("Profile not found for %s: %s", username, e)
-        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError:
+        log.warning("Profile not found for %s", username)
+        raise HTTPException(status_code=404, detail="Profile not found")
     except Exception as e:
         log.error("Failed to fetch profile for %s: %s", username, e, exc_info=True)
         raise HTTPException(status_code=502, detail="Nitter fetch failed. Please try again later.")
