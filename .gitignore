@@ -7,3 +7,10 @@ logs/
 *.egg-info/
 dist/
 build/
+
+
+
+# Source-level temp files
+src/api_stats.db
+src/logs/
+src/__pycache__/

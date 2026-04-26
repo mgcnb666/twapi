@@ -21,8 +21,14 @@ Query Twitter/X data through a local TwAPI service powered by Nitter instances.
 
 The TwAPI service must be running:
 ```bash
-cd /root/twapi
+cd /root/twapi/src
 uvicorn main:app --host 0.0.0.0 --port 30192 --workers 4
+```
+
+Or from the project root:
+```bash
+cd /root/twapi
+uvicorn src.main:app --host 0.0.0.0 --port 30192 --workers 4
 ```
 
 ## Quick Query
@@ -68,22 +74,6 @@ await client.close()
 - `text`, `date`, `retweets`, `quotes`, `likes`, `replies`
 - `images`, `videos`, `is_retweet`, `is_pinned`, `link`
 
-## Batch Queries
-
-```python
-from batch_client import BatchTwAPIClient
-
-client = BatchTwAPIClient("http://localhost:30192")
-
-# Batch user lookup (10 concurrent)
-users = ["elonmusk", "github", "twitter", "google"]
-results = await client.batch_get_users(users, concurrent=10)
-
-# Bulk search (20 workers)
-queries = ["python", "ai", "ml"]
-results = await client.bulk_search(queries, count=20, workers=20)
-```
-
 ## Changelog
 
 ### v2.0.0
@@ -92,8 +82,7 @@ results = await client.bulk_search(queries, count=20, workers=20)
 - Added global and per-instance concurrency limiting
 - Added parallel instance fetching (race mode)
 - Added parallel pagination support
-- Added batch query client
-- Added benchmark tool
+- Added input validation and security hardening
 
 ### v1.4.0
 - Structured logging
