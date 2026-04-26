@@ -112,6 +112,7 @@ def _safe_cursor(value: str) -> str:
 
 _TWITTER_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 _TWITTER_TWEET_ID_RE = re.compile(r"^\d{10,20}$")
+_MAX_QUERY_LEN = 200
 
 
 def _validate_username(value: str) -> str:
@@ -133,6 +134,18 @@ def _validate_tweet_id(value: str) -> str:
             detail=f"Invalid tweet ID format: '{value}'. Must be 10-20 digits.",
         )
     return value
+
+
+def _validate_query(value: str) -> str:
+    """Sanitise search query to prevent log injection and DoS."""
+    # Strip control chars
+    cleaned = "".join(c for c in value if c.isprintable())
+    if len(cleaned) > _MAX_QUERY_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query too long: {len(cleaned)} > {_MAX_QUERY_LEN} chars.",
+        )
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -518,13 +531,14 @@ async def search_tweets(
     all: bool = Query(False, description="Fetch ALL search results"),
 ):
     """Search tweets by keyword with high-concurrency pagination."""
+    validated_q = _validate_query(q)
     safe_cursor = _safe_cursor(cursor)
-    base_params: dict[str, str] = {"f": "tweets", "q": q}
+    base_params: dict[str, str] = {"f": "tweets", "q": validated_q}
     try:
         if all:
             tweets, last_cursor = await _fetch_all_tweets("/search", base_params)
             return SearchResponse(
-                query=q, tweets=tweets, cursor=last_cursor,
+                query=validated_q, tweets=tweets, cursor=last_cursor,
                 page=0, total_fetched=len(tweets),
             )
 
@@ -533,20 +547,20 @@ async def search_tweets(
             html, base = await client.fetch("/search", params=params)
             tweets, next_cursor = parse_tweets(html, base)
             return SearchResponse(
-                query=q, tweets=tweets, cursor=next_cursor,
+                query=validated_q, tweets=tweets, cursor=next_cursor,
                 page=0, total_fetched=len(tweets),
             )
 
         if count > 0:
             tweets, last_cursor = await _fetch_tweets_multi("/search", base_params, count)
             return SearchResponse(
-                query=q, tweets=tweets, cursor=last_cursor,
+                query=validated_q, tweets=tweets, cursor=last_cursor,
                 page=0, total_fetched=len(tweets),
             )
 
         tweets, next_cursor = await _fetch_page_n("/search", base_params, page)
         return SearchResponse(
-            query=q, tweets=tweets, cursor=next_cursor,
+            query=validated_q, tweets=tweets, cursor=next_cursor,
             page=page, total_fetched=len(tweets),
         )
     except HTTPException:
@@ -564,28 +578,29 @@ async def search_users(
     cursor: str = Query("", description="Raw pagination cursor"),
 ):
     """Search Twitter users by keyword."""
+    validated_q = _validate_query(q)
     safe_cursor = _safe_cursor(cursor)
-    base_params: dict[str, str] = {"f": "users", "q": q}
+    base_params: dict[str, str] = {"f": "users", "q": validated_q}
     try:
         if safe_cursor:
             params = {**base_params, "cursor": safe_cursor}
             html, base = await client.fetch("/search", params=params)
             users, next_cursor = parse_user_search(html, base)
             return UserSearchResponse(
-                query=q, users=users, cursor=next_cursor,
+                query=validated_q, users=users, cursor=next_cursor,
                 page=0, total_fetched=len(users),
             )
 
         if count > 0:
             users, last_cursor = await _fetch_users_multi(base_params, count)
             return UserSearchResponse(
-                query=q, users=users, cursor=last_cursor,
+                query=validated_q, users=users, cursor=last_cursor,
                 page=0, total_fetched=len(users),
             )
 
         users, next_cursor = await _fetch_users_page_n(base_params, page)
         return UserSearchResponse(
-            query=q, users=users, cursor=next_cursor,
+            query=validated_q, users=users, cursor=next_cursor,
             page=page, total_fetched=len(users),
         )
     except HTTPException:

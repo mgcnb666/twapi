@@ -30,8 +30,11 @@ class StatsTracker:
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=10.0)
             conn.row_factory = sqlite3.Row
+            # Enable WAL mode for better concurrent write performance
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             self._local.conn = conn
         return conn
 
