@@ -93,7 +93,6 @@ class NitterClient:
         self._cookies: dict[str, dict[str, str]] = {u: {} for u in self._instances}
         self._cf_browser = None  # lazy import
         self._health_task: asyncio.Task | None = None
-        self._total_fetch_timeout: float = 60.0
 
         # Global concurrency limit across all instances
         self._global_sem = asyncio.Semaphore(settings.max_concurrent_requests)
