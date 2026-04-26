@@ -21,7 +21,7 @@ from urllib.parse import urlencode
 
 from curl_cffi.requests import AsyncSession
 
-from src.config import settings
+from config import settings
 
 log = logging.getLogger("twapi.nitter_client")
 
@@ -154,7 +154,7 @@ class NitterClient:
             impersonate="chrome124",
             timeout=settings.fetch_timeout,
             # Connection pooling settings
-            http2=True,
+            # http2=True,  # curl_cffi 新版本不支持此参数
         )
         for name, val in self._cookies.get(instance, {}).items():
             s.cookies.set(name, val)
@@ -201,7 +201,8 @@ class NitterClient:
             healthy = list(self._instances)
         # Sort by latency, take top N
         healthy.sort(key=lambda u: self._health.get(u, float('inf')))
-        return healthy[:count]
+        # Return more instances to increase chance of success
+        return healthy[:max(count, 5)]
 
     # ---- Anubis challenge solvers -------------------------------------------
 
@@ -406,9 +407,10 @@ class NitterClient:
                             return result
                     except Exception as exc:
                         last_error = exc
+                        log.warning("Instance failed for %s: %s", path, exc)
 
             # All failed
-            log.error("All Nitter instances failed for %s (tried %s)", path, instances)
+            log.error("All Nitter instances failed for %s (tried %s). Last error: %s", path, instances, last_error)
             raise last_error or RuntimeError("All Nitter instances failed")
 
     # ---- parallel batch fetch ------------------------------------------------

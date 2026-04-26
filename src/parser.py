@@ -44,7 +44,7 @@ def parse_user_profile(html: str, base_url: str) -> UserProfile:
     if not profile:
         raise ValueError("Profile card not found – user may not exist")
 
-    username = _text(profile.select_one(".profile-card-username"))
+    username = _text(profile.select_one(".profile-card-username")).lstrip("@")
     display_name = _text(profile.select_one(".profile-card-fullname"))
     avatar_url = _fix_img_url(_attr(profile.select_one(".profile-card-avatar img"), "src"), base_url)
     banner_el = soup.select_one(".profile-banner a") or soup.select_one(".profile-banner img")
@@ -94,7 +94,7 @@ def parse_tweet_item(item: Tag, base_url: str) -> Tweet:
     is_pinned = item.select_one(".pinned") is not None
 
     # author info – xcancel uses .fullname / .username classes
-    author = _text(item.select_one(".tweet-header .username"))
+    author = _text(item.select_one(".tweet-header .username")).lstrip("@")
     display_name = _text(item.select_one(".tweet-header .fullname"))
     avatar_el = item.select_one(".tweet-header img.avatar") or item.select_one(".tweet-avatar img")
     avatar_url = _fix_img_url(_attr(avatar_el, "src"), base_url)
@@ -231,7 +231,7 @@ def parse_user_search(html: str, base_url: str) -> tuple[list[UserSearchResult],
         if not body:
             continue
         try:
-            username = _text(body.select_one(".username"))
+            username = _text(body.select_one(".username")).lstrip("@")
             display_name = _text(body.select_one(".fullname"))
             avatar_el = body.select_one("img.avatar")
             avatar_url = _fix_img_url(_attr(avatar_el, "src"), base_url)
