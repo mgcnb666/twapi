@@ -163,3 +163,55 @@ def test_upstream_404_html_is_returned_to_parser_without_circuit_failure(monkeyp
 
     assert result == ("<html>not found</html>", base)
     assert client._circuit_breakers[base].failures == 0
+
+
+def test_page_parameter_has_upper_bound_before_fetch(monkeypatch):
+    async def fail_if_called(*args, **kwargs):
+        raise AssertionError("deep page fetch should be rejected before upstream calls")
+
+    monkeypatch.setattr(main.client, "fetch", fail_if_called)
+    client = TestClient(main.app)
+
+    response = client.get("/api/user/github/tweets", params={"page": main.MAX_PAGE + 1})
+
+    assert response.status_code == 422
+
+
+def test_get_healthy_instances_honors_requested_race_width(monkeypatch):
+    instances = [f"https://nitter{i}.test" for i in range(6)]
+    monkeypatch.setattr(main.settings, "instances", instances)
+    client = NitterClient()
+
+    selected = asyncio.run(client._get_healthy_instances(count=3))
+
+    assert len(selected) == 3
+
+
+def test_unknown_stats_endpoint_is_bucketed_not_reflected():
+    payload = "/api/<script>alert(1)</script>"
+
+    assert stats._classify_endpoint(payload) == "other"
+
+
+def test_cleanup_old_records_also_caps_total_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "api_stats.db"
+    monkeypatch.setattr(stats, "DB_PATH", str(db_path))
+    tracker = stats.StatsTracker()
+    tracker.init_db()
+    conn = tracker._conn()
+    now = datetime.now(timezone.utc).isoformat()
+    for i in range(5):
+        conn.execute(
+            """INSERT INTO api_calls
+               (timestamp, method, path, endpoint, query, status_code,
+                latency_ms, client_ip, user_agent, error)
+               VALUES (?, 'GET', ?, 'test', '', 200, 1.0, '', '', '')""",
+            (now, f"/api/test/{i}"),
+        )
+    conn.commit()
+
+    deleted = tracker.cleanup_old_records(hours=168, max_rows=2)
+    remaining = conn.execute("SELECT path FROM api_calls ORDER BY id").fetchall()
+
+    assert deleted == 3
+    assert [r["path"] for r in remaining] == ["/api/test/3", "/api/test/4"]

@@ -64,6 +64,11 @@ class Settings:
     circuit_breaker_recovery: float = field(default_factory=lambda: _env_float("TWAPI_CB_RECOVERY", 30.0))
     enable_parallel_pagination: bool = field(default_factory=lambda: _env_bool("TWAPI_PARALLEL_PAGES", True))
     max_parallel_pages: int = field(default_factory=lambda: _env_int("TWAPI_MAX_PARALLEL_PAGES", 5))
+    race_width: int = field(default_factory=lambda: _env_int("TWAPI_RACE_WIDTH", 3))
+    max_page: int = field(default_factory=lambda: _env_int("TWAPI_MAX_PAGE", 25))
+    stats_retention_hours: int = field(default_factory=lambda: _env_int("TWAPI_STATS_RETENTION_HOURS", 168))
+    stats_max_rows: int = field(default_factory=lambda: _env_int("TWAPI_STATS_MAX_ROWS", 100_000))
+    stats_cleanup_interval: int = field(default_factory=lambda: _env_int("TWAPI_STATS_CLEANUP_INTERVAL", 3600))
 
 
 settings = Settings()

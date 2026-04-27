@@ -174,17 +174,29 @@ class StatsTracker:
         return [dict(r) for r in rows]
 
 
-    def cleanup_old_records(self, hours: int = 168) -> int:
-        """Delete records older than specified hours. Returns deleted count."""
+    def cleanup_old_records(self, hours: int = 168, max_rows: int | None = None) -> int:
+        """Delete old records and optionally cap total rows. Returns deleted count."""
         conn = self._conn()
+        deleted = 0
         cursor = conn.execute(
             "DELETE FROM api_calls WHERE datetime(timestamp) < datetime('now', ?)",
             (f"-{hours} hours",),
         )
+        deleted += cursor.rowcount
+        if max_rows is not None and max_rows > 0:
+            cursor = conn.execute(
+                """DELETE FROM api_calls
+                   WHERE id NOT IN (
+                       SELECT id FROM api_calls ORDER BY id DESC LIMIT ?
+                   )""",
+                (max_rows,),
+            )
+            deleted += cursor.rowcount
         conn.commit()
-        # Run VACUUM to reclaim space
-        conn.execute("VACUUM")
-        return cursor.rowcount
+        if deleted:
+            # Run VACUUM to reclaim space after cleanup.
+            conn.execute("VACUUM")
+        return deleted
 
 
 def _redact_query(query: str, max_len: int = 500) -> str:
@@ -223,7 +235,7 @@ def _classify_endpoint(path: str) -> str:
                 return f"user/{parts[3]}"
         if parts[1] == "tweet":
             return "tweet/detail"
-    return path
+    return "other"
 
 
 class StatsMiddleware(BaseHTTPMiddleware):

@@ -223,10 +223,10 @@ class NitterClient:
         ]
         if not healthy:
             healthy = list(self._instances)
-        # Sort by latency, take top N
+        # Sort by latency, take requested top N.  Keep this strict: every
+        # returned instance becomes one outbound racing request.
         healthy.sort(key=lambda u: self._health.get(u, float('inf')))
-        # Return more instances to increase chance of success
-        return healthy[:max(count, 5)]
+        return healthy[:count]
 
     # ---- Anubis challenge solvers -------------------------------------------
 
@@ -424,7 +424,7 @@ class NitterClient:
                     return None
     async def fetch(self, path: str, params: dict[str, Any] | None = None) -> tuple[str, str]:
         """High-concurrency fetch with parallel instance racing."""
-        instances = await self._get_healthy_instances(count=3)
+        instances = await self._get_healthy_instances(count=max(1, settings.race_width))
         if not instances:
             instances = list(self._instances)
 

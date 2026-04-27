@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import logging.handlers
 import math
@@ -79,6 +80,11 @@ PAGE_SIZE = 20
 DEFAULT_MAX_COUNT = 500
 # Safety cap when all=true
 ALL_TWEETS_CAP = 10000
+# Maximum unauthenticated deep-pagination page. Cursor-based pagination remains
+# available for clients that need to continue from a known page.
+MAX_PAGE = settings.max_page
+
+_stats_cleanup_task: asyncio.Task | None = None
 
 
 def _effective_max_pages(count: int) -> int:
@@ -318,13 +324,41 @@ async def _fetch_users_page_n(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _stats_cleanup_task
     log.info("TwAPI v2.0.0 (High-Concurrency) starting on port %d", settings.port)
     stats_tracker.init_db()
+    stats_tracker.cleanup_old_records(
+        hours=settings.stats_retention_hours,
+        max_rows=settings.stats_max_rows,
+    )
+    _stats_cleanup_task = asyncio.create_task(_stats_cleanup_loop())
     await client.start()
     log.info("Startup complete — Nitter client ready with %d instances", len(settings.instances))
     yield
     log.info("Shutting down")
+    if _stats_cleanup_task:
+        _stats_cleanup_task.cancel()
+        try:
+            await _stats_cleanup_task
+        except asyncio.CancelledError:
+            pass
     await client.close()
+
+
+async def _stats_cleanup_loop() -> None:
+    while True:
+        try:
+            await asyncio.sleep(settings.stats_cleanup_interval)
+            deleted = stats_tracker.cleanup_old_records(
+                hours=settings.stats_retention_hours,
+                max_rows=settings.stats_max_rows,
+            )
+            if deleted:
+                log.info("Stats cleanup removed %d old/excess rows", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Stats cleanup failed")
 
 
 class SecurityHeadersMiddleware:
@@ -448,7 +482,7 @@ async def get_user_profile(username: str):
 @app.get("/api/user/{username}/tweets", response_model=UserTweetsResponse)
 async def get_user_tweets(
     username: str,
-    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page: int = Query(1, ge=1, le=MAX_PAGE, description="Page number (1-based)"),
     count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total tweets to fetch (overrides page)"),
     cursor: str = Query("", description="Raw pagination cursor (advanced)"),
     all: bool = Query(False, description="Fetch ALL tweets (ignores page/count limits)"),
@@ -497,7 +531,7 @@ async def get_user_tweets(
 @app.get("/api/user/{username}/retweets", response_model=UserRetweetsResponse)
 async def get_user_retweets(
     username: str,
-    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page: int = Query(1, ge=1, le=MAX_PAGE, description="Page number (1-based)"),
     count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total retweets to fetch"),
     cursor: str = Query("", description="Raw pagination cursor"),
     all: bool = Query(False, description="Fetch ALL retweets"),
@@ -579,7 +613,7 @@ async def get_tweet(username: str, tweet_id: str):
 @app.get("/api/search", response_model=SearchResponse)
 async def search_tweets(
     q: str = Query(..., description="Search query"),
-    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page: int = Query(1, ge=1, le=MAX_PAGE, description="Page number (1-based)"),
     count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total tweets to fetch (overrides page)"),
     cursor: str = Query("", description="Raw pagination cursor (advanced)"),
     all: bool = Query(False, description="Fetch ALL search results"),
@@ -629,7 +663,7 @@ async def search_tweets(
 @app.get("/api/search/users", response_model=UserSearchResponse)
 async def search_users(
     q: str = Query(..., description="Search query"),
-    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page: int = Query(1, ge=1, le=MAX_PAGE, description="Page number (1-based)"),
     count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total users to fetch"),
     cursor: str = Query("", description="Raw pagination cursor"),
 ):
