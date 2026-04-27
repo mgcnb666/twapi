@@ -154,7 +154,7 @@ function renderEndpoints(eps) {
     const pct = Math.round(e.calls / maxCalls * 100);
     const rate = e.calls > 0 ? Math.round(e.success / e.calls * 100) : 0;
     return `<tr>
-      <td><code>${e.endpoint}</code></td><td>${fmt(e.calls)}</td>
+      <td><code>${esc(e.endpoint)}</code></td><td>${fmt(e.calls)}</td>
       <td class="${rate >= 90 ? 'status-ok' : 'status-err'}">${rate}%</td>
       <td>${fmtMs(e.avg_ms)}</td>
       <td><div class="bar-wrap"><div class="bar-fill" style="width:${pct}%;background:var(--accent)"></div></div></td>

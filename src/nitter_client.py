@@ -364,98 +364,100 @@ class NitterClient:
         if not await self._circuit_breakers[base].can_try():
             return None
 
-        async with self._instance_sems[base]:  # Per-instance limit
-            # Cloudflare instance: use browser
-            if self._is_cf_instance(base):
-                try:
-                    html = await self._fetch_via_browser(base, path, params)
-                    if html and not _is_antibot_page(html) and not _is_cf_page(html):
-                        await self._circuit_breakers[base].record_success()
-                        return html, base
-                    await self._circuit_breakers[base].record_failure()
-                    return None
-                except Exception as exc:
-                    log.error("CF browser exception for %s: %s", base, exc)
-                    await self._circuit_breakers[base].record_failure()
-                    return None
-
-            # Normal instance: use persistent session
-            url = base.rstrip("/") + "/" + path.lstrip("/")
-            try:
-                session = self._get_session(base)
-                resp = await session.get(url, params=params, timeout=settings.request_timeout)
-                html = resp.text
-
-                if _is_anubis_page(html):
-                    solved = await self._try_solve_anubis(session, base, "/" + path.lstrip("/"), html)
-                    if solved:
-                        resp = await session.get(url, params=params, timeout=settings.request_timeout)
-                        html = resp.text
-                        self._save_cookies(base, session)
-                        if not _is_antibot_page(html) and not _is_anubis_page(html):
+        async with self._global_sem:  # Count each outbound attempt, not each API call
+            async with self._instance_sems[base]:  # Per-instance limit
+                # Cloudflare instance: use browser
+                if self._is_cf_instance(base):
+                    try:
+                        html = await self._fetch_via_browser(base, path, params)
+                        if html and not _is_antibot_page(html) and not _is_cf_page(html):
                             await self._circuit_breakers[base].record_success()
                             return html, base
+                        await self._circuit_breakers[base].record_failure()
+                        return None
+                    except Exception as exc:
+                        log.error("CF browser exception for %s: %s", base, exc)
+                        await self._circuit_breakers[base].record_failure()
+                        return None
+
+                # Normal instance: use persistent session
+                url = base.rstrip("/") + "/" + path.lstrip("/")
+                try:
+                    session = self._get_session(base)
+                    resp = await session.get(url, params=params, timeout=settings.request_timeout)
+                    html = resp.text
+
+                    if _is_anubis_page(html):
+                        solved = await self._try_solve_anubis(session, base, "/" + path.lstrip("/"), html)
+                        if solved:
+                            resp = await session.get(url, params=params, timeout=settings.request_timeout)
+                            html = resp.text
+                            self._save_cookies(base, session)
+                            if not _is_antibot_page(html) and not _is_anubis_page(html):
+                                await self._circuit_breakers[base].record_success()
+                                return html, base
+                        await self._circuit_breakers[base].record_failure()
+                        return None
+
+                    if _is_antibot_page(html):
+                        await self._circuit_breakers[base].record_failure()
+                        return None
+
+                    # 4xx pages (notably upstream 404 for missing users/tweets) are
+                    # valid HTML responses that downstream parsers convert into API
+                    # level 404s. Only treat server-side errors as instance failures.
+                    if resp.status_code >= 500:
+                        await self._circuit_breakers[base].record_failure()
+                        return None
+
+                    self._save_cookies(base, session)
+                    await self._circuit_breakers[base].record_success()
+                    return html, base
+
+                except Exception as exc:
+                    log.error("Request exception for %s%s: %s", base, path, exc)
                     await self._circuit_breakers[base].record_failure()
+                    # Force-close session on repeated failures to prevent stale connections
+                    cb = self._circuit_breakers[base]
+                    if cb.failures >= cb.fail_threshold - 1:
+                        self._close_and_remove_session(base)
                     return None
-
-                if _is_antibot_page(html):
-                    await self._circuit_breakers[base].record_failure()
-                    return None
-
-                if resp.status_code >= 500:
-                    await self._circuit_breakers[base].record_failure()
-                    return None
-
-                self._save_cookies(base, session)
-                await self._circuit_breakers[base].record_success()
-                return html, base
-
-            except Exception as exc:
-                log.error("Request exception for %s%s: %s", base, path, exc)
-                await self._circuit_breakers[base].record_failure()
-                # Force-close session on repeated failures to prevent stale connections
-                cb = self._circuit_breakers[base]
-                if cb.failures >= cb.fail_threshold - 1:
-                    self._close_and_remove_session(base)
-                return None
-
     async def fetch(self, path: str, params: dict[str, Any] | None = None) -> tuple[str, str]:
         """High-concurrency fetch with parallel instance racing."""
-        async with self._global_sem:
-            instances = await self._get_healthy_instances(count=3)
-            if not instances:
-                instances = list(self._instances)
+        instances = await self._get_healthy_instances(count=3)
+        if not instances:
+            instances = list(self._instances)
 
-            tasks = [
-                asyncio.create_task(self._fetch_single(inst, path, params))
-                for inst in instances
-            ]
+        tasks = [
+            asyncio.create_task(self._fetch_single(inst, path, params))
+            for inst in instances
+        ]
 
-            pending = set(tasks)
-            errors: list[Exception] = []
-            while pending:
-                done, pending = await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_COMPLETED
-                )
-                for task in done:
-                    try:
-                        result = task.result()
-                        if result is not None:
-                            # Cancel remaining tasks and await to suppress CancelledError
-                            for t in pending:
-                                t.cancel()
-                            if pending:
-                                await asyncio.gather(*pending, return_exceptions=True)
-                            return result
-                    except Exception as exc:
-                        errors.append(exc)
-                        log.warning("Instance failed for %s: %s", path, exc)
+        pending = set(tasks)
+        errors: list[Exception] = []
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                try:
+                    result = task.result()
+                    if result is not None:
+                        # Cancel remaining tasks and await to suppress CancelledError
+                        for t in pending:
+                            t.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
+                        return result
+                except Exception as exc:
+                    errors.append(exc)
+                    log.warning("Instance failed for %s: %s", path, exc)
 
-            # All failed
-            last_error = errors[-1] if errors else None
-            log.error("All Nitter instances failed for %s (tried %s). Errors: %s",
-                      path, instances, [str(e) for e in errors])
-            raise last_error or RuntimeError("All Nitter instances failed")
+        # All failed
+        last_error = errors[-1] if errors else None
+        log.error("All Nitter instances failed for %s (tried %s). Errors: %s",
+                  path, instances, [str(e) for e in errors])
+        raise last_error or RuntimeError("All Nitter instances failed")
 
     # ---- parallel batch fetch -----------------------------------------------
 
@@ -473,27 +475,26 @@ class NitterClient:
             log.warning("fetch_parallel batch truncated from %d to %d", len(requests), MAX_PARALLEL)
             requests = requests[:MAX_PARALLEL]
 
-        async with self._global_sem:
-            # Distribute requests across instances
-            instances = await self._get_healthy_instances(count=min(len(requests), 5))
-            if not instances:
-                instances = list(self._instances)
+        # Distribute requests across instances
+        instances = await self._get_healthy_instances(count=min(len(requests), 5))
+        if not instances:
+            instances = list(self._instances)
 
-            if not instances:
-                log.error("No Nitter instances available for parallel fetch")
-                return [None] * len(requests)
+        if not instances:
+            log.error("No Nitter instances available for parallel fetch")
+            return [None] * len(requests)
 
-            tasks = []
-            for i, (path, params) in enumerate(requests):
-                inst = instances[i % len(instances)]
-                task = asyncio.create_task(self._fetch_single(inst, path, params))
-                tasks.append(task)
+        tasks = []
+        for i, (path, params) in enumerate(requests):
+            inst = instances[i % len(instances)]
+            task = asyncio.create_task(self._fetch_single(inst, path, params))
+            tasks.append(task)
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            return [
-                r if not isinstance(r, Exception) else None
-                for r in results
-            ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return [
+            r if not isinstance(r, Exception) else None
+            for r in results
+        ]
 
     # ---- health check -------------------------------------------------------
 
@@ -530,6 +531,10 @@ class NitterClient:
             async with self._lock:
                 self._health[url] = -1
             await self._circuit_breakers[url].record_failure()
+
+    def get_cached_health(self) -> dict[str, float]:
+        """Return last known health without triggering upstream network checks."""
+        return dict(self._health)
 
     async def check_health(self) -> dict[str, float]:
         await asyncio.gather(*(self._check_one(u) for u in self._instances))

@@ -5,13 +5,13 @@ import logging.handlers
 import math
 import os
 import re
+import secrets
 from contextlib import asynccontextmanager
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import HTMLResponse
-from starlette.responses import Response
 
 from config import settings
 from models import (
@@ -103,8 +103,12 @@ def _safe_tweet_id(value: str) -> str:
 
 
 def _safe_cursor(value: str) -> str:
-    """Cursor is usually base64-ish; still sanitise separators."""
-    return value.replace("/", "").replace("\\", "").replace("\x00", "")
+    """Validate cursor while preserving URL-safe encoded value."""
+    if len(value) > _MAX_CURSOR_LEN:
+        raise HTTPException(status_code=400, detail="Cursor too long. Maximum allowed is 500 characters.")
+    if "\x00" in value:
+        raise HTTPException(status_code=400, detail="Invalid cursor format.")
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +118,7 @@ def _safe_cursor(value: str) -> str:
 _TWITTER_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 _TWITTER_TWEET_ID_RE = re.compile(r"^\d{10,20}$")
 _MAX_QUERY_LEN = 200
+_MAX_CURSOR_LEN = 500
 
 
 def _validate_username(value: str) -> str:
@@ -165,30 +170,6 @@ async def _fetch_tweets_multi(
     cursor = ""
     pages_fetched = 0
     max_pages = _effective_max_pages(count)
-
-    if settings.enable_parallel_pagination and max_pages > 1:
-        batch_size = min(settings.max_parallel_pages, max_pages)
-        requests = []
-        for i in range(batch_size):
-            params: dict[str, str] = dict(extra_params or {})
-            if i > 0 and cursor:
-                params["cursor"] = cursor
-            requests.append((path, params or None))
-
-        results = await client.fetch_parallel(requests)
-        for html, base in results:
-            if html is None:
-                continue
-            tweets, next_cursor = parse_tweets(html, base)
-            if not tweets:
-                continue
-            if filter_retweets:
-                tweets = [t for t in tweets if t.is_retweet]
-            all_tweets.extend(tweets)
-            cursor = next_cursor
-            pages_fetched += 1
-            if not cursor:
-                break
 
     while len(all_tweets) < count and pages_fetched < max_pages:
         params = dict(extra_params or {})
@@ -365,6 +346,7 @@ class SecurityHeadersMiddleware:
                     (b"x-frame-options", b"DENY"),
                     (b"x-xss-protection", b"1; mode=block"),
                     (b"referrer-policy", b"strict-origin-when-cross-origin"),
+                    (b"content-security-policy", b"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"),
                     (b"permissions-policy", b"accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"),
                 ]
                 headers.extend(security_headers)
@@ -389,16 +371,31 @@ app.add_middleware(SecurityHeadersMiddleware)
 # Dashboard authentication
 # ---------------------------------------------------------------------------
 dashboard_auth = HTTPBasic(auto_error=False)
-_DASHBOARD_USER = os.getenv("TWAPI_DASHBOARD_USER", "admin")
-_DASHBOARD_PASS = os.getenv("TWAPI_DASHBOARD_PASS", "admin")
+_DASHBOARD_USER = os.getenv("TWAPI_DASHBOARD_USER") or secrets.token_urlsafe(18)
+_DASHBOARD_PASS = os.getenv("TWAPI_DASHBOARD_PASS") or secrets.token_urlsafe(32)
+
+
+def _auth_error(detail: str = "Authentication required") -> HTTPException:
+    return HTTPException(
+        status_code=401,
+        detail=detail,
+        headers={"WWW-Authenticate": 'Basic realm="TwAPI Dashboard"'},
+    )
+
+
+def _verify_dashboard_credentials(credentials: HTTPBasicCredentials | None) -> HTTPBasicCredentials:
+    if not credentials:
+        raise _auth_error()
+    user_ok = secrets.compare_digest(credentials.username, _DASHBOARD_USER)
+    pass_ok = secrets.compare_digest(credentials.password, _DASHBOARD_PASS)
+    if not (user_ok and pass_ok):
+        raise _auth_error("Invalid credentials")
+    return credentials
+
 
 async def _require_dashboard_auth(credentials: HTTPBasicCredentials | None = Depends(dashboard_auth)):
     """Verify dashboard credentials."""
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    if credentials.username != _DASHBOARD_USER or credentials.password != _DASHBOARD_PASS:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return credentials
+    return _verify_dashboard_credentials(credentials)
 
 
 # ---------------------------------------------------------------------------
@@ -455,6 +452,7 @@ async def get_user_tweets(
     count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total tweets to fetch (overrides page)"),
     cursor: str = Query("", description="Raw pagination cursor (advanced)"),
     all: bool = Query(False, description="Fetch ALL tweets (ignores page/count limits)"),
+    credentials: HTTPBasicCredentials | None = Depends(dashboard_auth),
 ):
     """Get a user's tweets with high-concurrency pagination."""
     validated = _validate_username(username)
@@ -462,6 +460,7 @@ async def get_user_tweets(
     safe_cursor = _safe_cursor(cursor)
     try:
         if all:
+            _verify_dashboard_credentials(credentials)
             tweets, last_cursor = await _fetch_all_tweets(f"/{safe_user}", None)
             return UserTweetsResponse(
                 user=username, tweets=tweets, cursor=last_cursor,
@@ -502,6 +501,7 @@ async def get_user_retweets(
     count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total retweets to fetch"),
     cursor: str = Query("", description="Raw pagination cursor"),
     all: bool = Query(False, description="Fetch ALL retweets"),
+    credentials: HTTPBasicCredentials | None = Depends(dashboard_auth),
 ):
     """Get a user's retweets (filtered from timeline)."""
     validated = _validate_username(username)
@@ -509,6 +509,7 @@ async def get_user_retweets(
     safe_cursor = _safe_cursor(cursor)
     try:
         if all:
+            _verify_dashboard_credentials(credentials)
             tweets, last_cursor = await _fetch_all_tweets(
                 f"/{safe_user}", None, filter_retweets=True,
             )
@@ -582,6 +583,7 @@ async def search_tweets(
     count: int = Query(0, ge=0, le=DEFAULT_MAX_COUNT, description="Total tweets to fetch (overrides page)"),
     cursor: str = Query("", description="Raw pagination cursor (advanced)"),
     all: bool = Query(False, description="Fetch ALL search results"),
+    credentials: HTTPBasicCredentials | None = Depends(dashboard_auth),
 ):
     """Search tweets by keyword with high-concurrency pagination."""
     validated_q = _validate_query(q)
@@ -589,6 +591,7 @@ async def search_tweets(
     base_params: dict[str, str] = {"f": "tweets", "q": validated_q}
     try:
         if all:
+            _verify_dashboard_credentials(credentials)
             tweets, last_cursor = await _fetch_all_tweets("/search", base_params)
             return SearchResponse(
                 query=validated_q, tweets=tweets, cursor=last_cursor,
@@ -666,7 +669,7 @@ async def search_users(
 @app.get("/api/health", response_model=HealthResponse)
 async def health_check():
     """Check health of all configured Nitter instances."""
-    status = await client.check_health()
+    status = client.get_cached_health()
     instances = [
         InstanceHealth(url=url, healthy=lat >= 0, latency_ms=round(lat, 1))
         for url, lat in status.items()
@@ -682,6 +685,7 @@ async def health_check():
 @app.get("/api/stats")
 async def get_stats(
     hours: int = Query(24, ge=1, le=720, description="Hours of history to include"),
+    credentials: HTTPBasicCredentials = Depends(_require_dashboard_auth),
 ):
     """Get API call statistics as JSON."""
     return stats_tracker.get_summary(hours=hours)
@@ -690,6 +694,7 @@ async def get_stats(
 @app.get("/api/stats/recent")
 async def get_recent_calls(
     limit: int = Query(50, ge=1, le=500, description="Number of recent calls"),
+    credentials: HTTPBasicCredentials = Depends(_require_dashboard_auth),
 ):
     """Get recent API call log."""
     return stats_tracker.get_recent(limit=limit)

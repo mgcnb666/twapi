@@ -95,8 +95,11 @@ def parse_tweet_item(item: Tag, base_url: str) -> Tweet:
         if depth >= max_depth:
             break
 
-    is_retweet = item.select_one(".retweet-header") is not None
-    is_pinned = item.select_one(".pinned") is not None
+    is_retweet = (
+        item.select_one(".retweet-header") is not None
+        or (parent is not None and parent.select_one(".retweet-header") is not None)
+    )
+    is_pinned = item.select_one(".pinned") is not None or (parent is not None and parent.select_one(".pinned") is not None)
 
     # author info – xcancel uses .fullname / .username classes
     author = _text(item.select_one(".tweet-header .username")).lstrip("@")

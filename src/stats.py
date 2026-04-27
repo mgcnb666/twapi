@@ -76,17 +76,18 @@ class StatsTracker:
     ) -> None:
         endpoint = _classify_endpoint(path)
         ts = datetime.now(timezone.utc).isoformat()
+        safe_query = _redact_query(query)
         async with self._lock:
             conn = self._conn()
             conn.execute(
-            """INSERT INTO api_calls
-               (timestamp, method, path, endpoint, query, status_code,
-                latency_ms, client_ip, user_agent, error)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (ts, method, path, endpoint, query, status_code,
-             round(latency_ms, 2), client_ip, user_agent, error),
-        )
-        conn.commit()
+                """INSERT INTO api_calls
+                   (timestamp, method, path, endpoint, query, status_code,
+                    latency_ms, client_ip, user_agent, error)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ts, method, path, endpoint, safe_query, status_code,
+                 round(latency_ms, 2), client_ip, user_agent, error),
+            )
+            conn.commit()
 
     def get_summary(self, *, hours: int = 24) -> dict:
         conn = self._conn()
@@ -99,7 +100,7 @@ class StatsTracker:
                  ROUND(MIN(latency_ms), 1)                   AS min_latency_ms,
                  ROUND(MAX(latency_ms), 1)                   AS max_latency_ms
                FROM api_calls
-               WHERE timestamp >= datetime('now', ?)""",
+               WHERE datetime(timestamp) >= datetime('now', ?)""",
             (f"-{hours} hours",),
         ).fetchone()
 
@@ -109,7 +110,7 @@ class StatsTracker:
                       SUM(CASE WHEN status_code < 400 THEN 1 ELSE 0 END) AS success,
                       ROUND(AVG(latency_ms), 1) AS avg_ms
                FROM api_calls
-               WHERE timestamp >= datetime('now', ?)
+               WHERE datetime(timestamp) >= datetime('now', ?)
                GROUP BY endpoint ORDER BY calls DESC""",
             (f"-{hours} hours",),
         ).fetchall()
@@ -117,18 +118,18 @@ class StatsTracker:
         by_status = conn.execute(
             """SELECT status_code, COUNT(*) AS count
                FROM api_calls
-               WHERE timestamp >= datetime('now', ?)
+               WHERE datetime(timestamp) >= datetime('now', ?)
                GROUP BY status_code ORDER BY count DESC""",
             (f"-{hours} hours",),
         ).fetchall()
 
         by_hour = conn.execute(
-            """SELECT strftime('%Y-%m-%dT%H:00:00', timestamp) AS hour,
+            """SELECT strftime('%Y-%m-%dT%H:00:00', datetime(timestamp)) AS hour,
                       COUNT(*) AS calls,
                       ROUND(AVG(latency_ms), 1) AS avg_ms,
                       SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
                FROM api_calls
-               WHERE timestamp >= datetime('now', ?)
+               WHERE datetime(timestamp) >= datetime('now', ?)
                GROUP BY hour ORDER BY hour""",
             (f"-{hours} hours",),
         ).fetchall()
@@ -136,7 +137,7 @@ class StatsTracker:
         top_paths = conn.execute(
             """SELECT path, COUNT(*) AS calls
                FROM api_calls
-               WHERE timestamp >= datetime('now', ?)
+               WHERE datetime(timestamp) >= datetime('now', ?)
                GROUP BY path ORDER BY calls DESC LIMIT 20""",
             (f"-{hours} hours",),
         ).fetchall()
@@ -177,13 +178,28 @@ class StatsTracker:
         """Delete records older than specified hours. Returns deleted count."""
         conn = self._conn()
         cursor = conn.execute(
-            "DELETE FROM api_calls WHERE timestamp < datetime('now', ?)",
+            "DELETE FROM api_calls WHERE datetime(timestamp) < datetime('now', ?)",
             (f"-{hours} hours",),
         )
         conn.commit()
         # Run VACUUM to reclaim space
         conn.execute("VACUUM")
         return cursor.rowcount
+
+
+def _redact_query(query: str, max_len: int = 500) -> str:
+    """Redact sensitive/high-cardinality query parameters before storing stats."""
+    if not query:
+        return ""
+    from urllib.parse import parse_qsl, urlencode
+
+    redacted = []
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        if key.lower() in {"q", "cursor", "token", "password", "passwd", "api_key", "secret"}:
+            value = "[redacted]"
+        redacted.append((key, value))
+    safe = urlencode(redacted, doseq=True)
+    return safe[:max_len]
 
 
 def _classify_endpoint(path: str) -> str:
